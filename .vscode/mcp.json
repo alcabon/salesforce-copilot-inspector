@@ -1,0 +1,17 @@
+{
+  "servers": {
+    "Salesforce DX": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@salesforce/mcp",
+        "--orgs",
+        "testing",
+        "--toolsets",
+        "users,testing",
+        "--allow-non-ga-tools"
+      ]
+    }
+  }
+}

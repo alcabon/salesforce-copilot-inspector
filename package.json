@@ -1,0 +1,78 @@
+{
+  "name": "salesforce-github-copilot",
+  "displayName": "Salesforce Github Copilot",
+  "description": "Verify GitHub Copilot configurations, installed skills, hooks, instructions, and Salesforce MCP server setup",
+  "version": "0.1.0",
+  "icon": "assets/logo.png",
+  "engines": {
+    "vscode": "^1.120.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "copilot-checks-panel",
+          "title": "Salesforce Github Copilot",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "copilot-checks-panel": [
+        {
+          "type": "webview",
+          "id": "copilotChecksView",
+          "name": "Salesforce Github Copilot"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "salesforce-github-copilot.refresh",
+        "title": "Refresh Checks",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "salesforce-github-copilot.refresh",
+          "when": "view == copilotChecksView",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run bundle -- --production",
+    "bundle": "node esbuild.js",
+    "bundle:watch": "node esbuild.js --watch",
+    "package": "npm run bundle -- --production && npx @vscode/vsce package --no-dependencies --allow-missing-repository --skip-license",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "overrides": {
+    "diff": "9.0.0",
+    "serialize-javascript": "7.0.5"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.120.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.28.0",
+    "eslint": "^9.39.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1"
+  }
+}
