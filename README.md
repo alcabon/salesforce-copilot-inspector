@@ -34,7 +34,7 @@ Or via the VS Code UI: open the Extensions side-bar (`Ctrl+Shift+P` → **Extens
 
 ---
 
-<img width="1905" height="862" alt="image" src="https://github.com/user-attachments/assets/c6478ac0-942b-4b86-9bb4-1dfa11b62a91" />
+<img width="1872" height="937" alt="image" src="https://github.com/user-attachments/assets/23b14d95-9c30-49ea-b059-d4b39d1ebec2" />
 
 ---
 
