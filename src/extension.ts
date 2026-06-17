@@ -573,6 +573,181 @@ const MCP_NONGA_INFO: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// Live MCP toolset discovery (Option C)
+//
+// Query the user's actually-installed @salesforce/mcp server over the MCP
+// stdio protocol, then reconcile the result against the built-in MCP_TOOLSETS
+// catalog above. The catalog remains the fallback whenever discovery cannot
+// run (no org, npx/network failure, timeout). Two protocol facts shape this:
+//   • `tools/list` is FLAT — it carries no toolset grouping, so membership is
+//     learned by probing one `--toolsets <name>` at a time.
+//   • GA vs non-GA is not exposed per tool, so it is derived by diffing the
+//     full `--toolsets all` run against the same run WITHOUT non-GA tools.
+// ---------------------------------------------------------------------------
+
+interface JsonRpcMessage {
+	jsonrpc: '2.0';
+	id?: number;
+	method?: string;
+	params?: unknown;
+	result?: unknown;
+	error?: unknown;
+}
+
+interface McpDiscoveryResult {
+	toolsets: McpToolset[];
+	nonGaInfo: Record<string, string>;
+	probedToolsets: number;
+	failedToolsets: string[];
+}
+
+// Speak just enough of the MCP stdio protocol to call tools/list once and
+// return the exposed tool names for the given --toolsets selection. Resolves
+// null if the server cannot be started or queried within the timeout.
+function listMcpServerTools(
+	org: string,
+	toolsets: string,
+	allowNonGa: boolean,
+	cwd: string,
+	timeoutMs = 60000,
+): Promise<string[] | null> {
+	return new Promise((resolve) => {
+		const args = ['-y', '@salesforce/mcp', '--orgs', org, '--toolsets', toolsets];
+		if (allowNonGa) { args.push('--allow-non-ga-tools'); }
+
+		const isWin = process.platform === 'win32';
+		let child: child_process.ChildProcess;
+		try {
+			// Node refuses to spawn a .cmd shim without a shell on Windows.
+			child = child_process.spawn(isWin ? 'npx.cmd' : 'npx', args, {
+				cwd,
+				windowsHide: true,
+				shell: isWin,
+			});
+		} catch {
+			resolve(null);
+			return;
+		}
+		if (!child.stdin || !child.stdout) { resolve(null); return; }
+		const stdin = child.stdin;
+
+		let settled = false;
+		const tools: string[] = [];
+		let buf = '';
+
+		const finish = (result: string[] | null) => {
+			if (settled) { return; }
+			settled = true;
+			clearTimeout(timer);
+			try { child.kill(); } catch { /* ignore */ }
+			resolve(result);
+		};
+		const timer = setTimeout(() => finish(null), timeoutMs);
+
+		const send = (msg: JsonRpcMessage) => {
+			try { stdin.write(JSON.stringify(msg) + '\n'); } catch { /* ignore */ }
+		};
+
+		const handle = (msg: JsonRpcMessage) => {
+			if (msg.id === 1) {                       // initialize response
+				if (msg.error) { finish(null); return; }
+				send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+				send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+			} else if (msg.id === 2 && msg.result) {  // tools/list response (paginated)
+				const r = msg.result as { tools?: Array<{ name?: string }>; nextCursor?: string };
+				for (const t of r.tools ?? []) { if (t.name) { tools.push(t.name); } }
+				if (r.nextCursor) {
+					send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: { cursor: r.nextCursor } });
+				} else {
+					finish(tools);
+				}
+			}
+		};
+
+		child.on('error', () => finish(null));
+		child.on('exit', () => finish(tools.length ? tools : null));
+		child.stdout.setEncoding('utf8');
+		child.stdout.on('data', (chunk: string) => {
+			// MCP stdio framing is newline-delimited JSON; tolerate noise lines.
+			buf += chunk;
+			let nl: number;
+			while ((nl = buf.indexOf('\n')) !== -1) {
+				const line = buf.slice(0, nl).trim();
+				buf = buf.slice(nl + 1);
+				if (!line) { continue; }
+				try { handle(JSON.parse(line) as JsonRpcMessage); } catch { /* not a JSON-RPC line */ }
+			}
+		});
+
+		send({
+			jsonrpc: '2.0',
+			id: 1,
+			method: 'initialize',
+			params: {
+				protocolVersion: '2024-11-05',
+				capabilities: {},
+				clientInfo: { name: 'salesforce-github-copilot', version: '1.0.0' },
+			},
+		});
+	});
+}
+
+// Run an async mapper over items with a bounded number of in-flight calls.
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+	const results: R[] = new Array(items.length);
+	let next = 0;
+	const worker = async () => {
+		while (next < items.length) {
+			const idx = next++;
+			results[idx] = await fn(items[idx]);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+	return results;
+}
+
+// Discover toolsets/tools/GA-status from the installed server. Returns null on
+// total failure (caller then keeps the built-in catalog); on partial failure
+// the toolsets that could not be probed keep their built-in definition.
+async function discoverMcpToolsets(org: string, cwd: string): Promise<McpDiscoveryResult | null> {
+	// Global GA set across every toolset. Run first (sequentially) so the npx
+	// download is cached before the parallel per-toolset probes fan out.
+	const gaAll = await listMcpServerTools(org, 'all', false, cwd);
+	if (!gaAll) { return null; }
+	const gaSet = new Set(gaAll);
+
+	// Per-toolset membership (non-GA tools included so we can classify them).
+	const names = MCP_TOOLSETS.map(t => t.name);
+	const probed = await mapWithConcurrency(names, 4, async (name) => ({
+		name,
+		tools: await listMcpServerTools(org, name, true, cwd),
+	}));
+
+	const failed: string[] = [];
+	const discoveredNonGa: Record<string, string> = {};
+	const toolsets: McpToolset[] = MCP_TOOLSETS.map((base) => {
+		const found = probed.find(p => p.name === base.name);
+		if (!found?.tools || found.tools.length === 0) {
+			failed.push(base.name);
+			return base; // keep the built-in definition for this toolset
+		}
+		const tools = [...found.tools].sort();
+		const nonGaTools = tools.filter(t => !gaSet.has(t));
+		for (const t of nonGaTools) { discoveredNonGa[t] = MCP_NONGA_INFO[t] ?? ''; }
+		return { ...base, tools, nonGaTools };
+	});
+
+	if (failed.length === MCP_TOOLSETS.length) { return null; }
+
+	return {
+		toolsets,
+		nonGaInfo: { ...MCP_NONGA_INFO, ...discoveredNonGa },
+		probedToolsets: MCP_TOOLSETS.length - failed.length,
+		failedToolsets: failed,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Templates
 // ---------------------------------------------------------------------------
 
@@ -1212,6 +1387,13 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 
 	private _view?: vscode.WebviewView;
 	private _lastChecks: CheckResult[] = [];
+	// Live toolset discovery (Option C). Cached in memory for the session;
+	// falls back to the built-in MCP_TOOLSETS catalog until a discovery runs.
+	private _liveToolsets?: McpToolset[];
+	private _liveNonGaInfo?: Record<string, string>;
+	private _toolsetSource: 'live' | 'builtin' = 'builtin';
+	private _discoveredAt?: number;
+	private _discovering = false;
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -1305,6 +1487,9 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 						!!data.allowNonGa,
 					);
 					break;
+				case 'discoverMcpToolsets':
+					await this._handleDiscoverMcp(webviewView.webview);
+					break;
 				case 'ready':
 					await this._sendAll(webviewView.webview);
 					break;
@@ -1332,7 +1517,13 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 		const personalCreators = getPersonalCreatorItems();
 		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		const mcpFiles = checkMcpConfig(root);
-		webview.postMessage({ type: 'data', checks: this._lastChecks, creators, personalCreators, homeDir: os.homedir(), mcpFiles, mcpToolsets: MCP_TOOLSETS, mcpNonGaInfo: MCP_NONGA_INFO });
+		webview.postMessage({
+			type: 'data', checks: this._lastChecks, creators, personalCreators, homeDir: os.homedir(), mcpFiles,
+			mcpToolsets: this._liveToolsets ?? MCP_TOOLSETS,
+			mcpNonGaInfo: this._liveNonGaInfo ?? MCP_NONGA_INFO,
+			mcpToolsetSource: this._toolsetSource,
+			mcpDiscoveredAt: this._discoveredAt,
+		});
 	}
 
 	private async _handleCreate(webview: vscode.Webview, fileType: string) {
@@ -1575,6 +1766,49 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 			await this._sendAll(webview);
 		} catch (e) {
 			vscode.window.showErrorMessage(`Failed to write MCP config: ${String(e)}`);
+		}
+	}
+
+	// Option C — query the installed @salesforce/mcp server for the live
+	// toolset list, caching the result for the session. Any failure leaves the
+	// built-in MCP_TOOLSETS catalog in place.
+	private async _handleDiscoverMcp(webview: vscode.Webview): Promise<void> {
+		const status = (state: 'progress' | 'done' | 'error', message: string): void => {
+			webview.postMessage({ type: 'mcpDiscoverStatus', state, message });
+		};
+
+		if (this._discovering) { return; }
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!root) { status('error', 'No workspace folder open.'); return; }
+
+		status('progress', 'Resolving default org…');
+		const org = await getDefaultOrgUsername(root);
+		if (!org) {
+			status('error', 'No default org — run "sf org login web" or "sf config set target-org <username>".');
+			return;
+		}
+
+		this._discovering = true;
+		status('progress', `Querying @salesforce/mcp (org: ${org})… first run can take ~30s while npx downloads it.`);
+		try {
+			const result = await discoverMcpToolsets(org, root);
+			if (!result) {
+				status('error', 'Could not query the MCP server — keeping the built-in list.');
+				return;
+			}
+			this._liveToolsets = result.toolsets;
+			this._liveNonGaInfo = result.nonGaInfo;
+			this._toolsetSource = 'live';
+			this._discoveredAt = Date.now();
+			const note = result.failedToolsets.length
+				? ` (${result.failedToolsets.length} kept from built-in: ${result.failedToolsets.join(', ')})`
+				: '';
+			status('done', `Read ${result.probedToolsets} toolset(s) from your installed server.${note}`);
+			await this._sendAll(webview);
+		} catch (e) {
+			status('error', `Discovery failed: ${String(e)}`);
+		} finally {
+			this._discovering = false;
 		}
 	}
 
@@ -1890,6 +2124,23 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .mcp-section-hdr {
       display: flex; align-items: center; justify-content: space-between;
     }
+    /* ── MCP live toolset discovery (Option C) ─────────── */
+    .mcp-src-note {
+      font-size: 10px; line-height: 1.5; margin: 4px 0 2px 0;
+      color: var(--vscode-descriptionForeground);
+    }
+    .mcp-src-note.live { color: #4ec9b0; }
+    .mcp-discover-status {
+      margin: 4px 0; padding: 4px 8px; font-size: 10px; border-radius: 4px;
+      border: 1px solid var(--vscode-panel-border, #333);
+    }
+    .mcp-discover-status.progress { color: var(--vscode-descriptionForeground); }
+    .mcp-discover-status.done {
+      color: #4ec9b0; background: rgba(78,201,176,.08); border-color: rgba(78,201,176,.35);
+    }
+    .mcp-discover-status.error {
+      color: #f0c040; background: rgba(240,192,64,.08); border-color: rgba(240,192,64,.35);
+    }
   </style>
 </head>
 <body>
@@ -1973,7 +2224,9 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
         renderChecks(data.checks);
         renderCreators(data.creators, 'creator-list');
         renderCreators(data.personalCreators, 'personal-creator-list');
-        renderMcp(data.mcpFiles, data.mcpToolsets);
+        _mcpSource = data.mcpToolsetSource || 'builtin';
+        _mcpDiscoveredAt = data.mcpDiscoveredAt || null;
+        renderMcp(data.mcpFiles, data.mcpToolsets, data.mcpNonGaInfo);
       } else if (data.type === 'checkSkillResult') {
         const icon = data.status === 'ok' ? '✓' : data.status === 'warn' ? '⚠' : '✗';
         const detail = data.status === 'ok' ? 'ok' : (data.errors.length + data.warnings.length) + ' issue' + ((data.errors.length + data.warnings.length) !== 1 ? 's' : '');
@@ -1995,6 +2248,19 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
           statusDiv.textContent = (data.ok ? '✓ ' : '✗ ') + data.message;
           const body = row.querySelector('.check-body');
           if (body) { body.appendChild(statusDiv); }
+        }
+      } else if (data.type === 'mcpDiscoverStatus') {
+        const st = document.getElementById('mcp-discover-status');
+        if (st) {
+          st.style.display = '';
+          st.className = 'mcp-discover-status ' + data.state;
+          st.textContent = data.message;
+        }
+        // 'done' is followed by a fresh 'data' render; keep the button locked
+        // only while a probe is actually in flight.
+        if (data.state !== 'progress') {
+          const btn = document.getElementById('btnMcpDiscover');
+          if (btn) { btn.disabled = false; btn.textContent = '⟳ from server'; }
         }
       }
     });
@@ -2129,6 +2395,8 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 
     // ── render MCP tab ────────────────────────────────────
     let _mcpNonGaInfo = {};
+    let _mcpSource = 'builtin';
+    let _mcpDiscoveredAt = null;
     function renderMcp(files, toolsets, nonGaInfo) {
       if (!files || !toolsets) { return; }
       if (nonGaInfo) { _mcpNonGaInfo = nonGaInfo; }
@@ -2196,8 +2464,19 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       // ── Toolsets with checkboxes ──────────────────────
       html += '<div class="mcp-section-hdr" style="margin-top:16px">';
       html += '<div class="cat-header" style="margin-top:0;margin-bottom:0">Toolsets</div>';
+      html += '<span style="display:flex;align-items:center;gap:8px">';
       html += '<a href="https://developer.salesforce.com/docs/platform/lwc/guide/mcp-reference.html" style="font-size:10px;opacity:0.7;text-decoration:none" title="Salesforce MCP Reference">Tools Reference ↗</a>';
+      html += '<button class="btn-icon" id="btnMcpDiscover" title="Query your installed @salesforce/mcp server for the live toolset list and GA/non-GA status">⟳ from server</button>';
+      html += '</span>';
       html += '</div>';
+      // Source indicator — built-in catalog vs. live discovery.
+      if (_mcpSource === 'live') {
+        const when = _mcpDiscoveredAt ? new Date(_mcpDiscoveredAt).toLocaleTimeString() : '';
+        html += '<div class="mcp-src-note live">● Live — read from your installed @salesforce/mcp' + (when ? ' at ' + esc(when) : '') + '</div>';
+      } else {
+        html += '<div class="mcp-src-note">○ Built-in list — click <strong>⟳ from server</strong> to read the live toolsets &amp; GA/non-GA status from your installed @salesforce/mcp.</div>';
+      }
+      html += '<div class="mcp-discover-status" id="mcp-discover-status" style="display:none"></div>';
       html += '<p class="create-intro" style="margin-bottom:4px">Check a <strong>toolset</strong> to enable all its tools, or check individual tools for <code style="font-size:10px;background:rgba(0,0,0,.2);padding:1px 4px;border-radius:2px">--tools</code>. Badges mark non-GA tools.</p>';
 
       for (const ts of toolsets) {
@@ -2262,6 +2541,18 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       root.querySelector('#btnMcpRefresh').addEventListener('click', () =>
         vscode.postMessage({ type: 'refresh' })
       );
+
+      // Discover-from-server button (Option C)
+      const discBtn = root.querySelector('#btnMcpDiscover');
+      if (discBtn) {
+        discBtn.addEventListener('click', () => {
+          discBtn.disabled = true;
+          discBtn.textContent = '⟳ querying…';
+          const st = document.getElementById('mcp-discover-status');
+          if (st) { st.style.display = ''; st.className = 'mcp-discover-status progress'; st.textContent = 'Starting…'; }
+          vscode.postMessage({ type: 'discoverMcpToolsets' });
+        });
+      }
 
       // SHOW buttons — open file in editor
       root.querySelectorAll('.btn-show-file').forEach(btn => {

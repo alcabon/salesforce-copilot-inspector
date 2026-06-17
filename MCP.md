@@ -445,6 +445,13 @@ The **MCP tab** in the Salesforce Github Copilot sidebar provides a GUI for the 
 | Install / reconfigure for Claude Code | Select toolsets → **Install for Workspace (Claude Code)** |
 | Enable non-GA tools | Check **--allow-non-ga-tools** before installing |
 | Refresh detection | Click **↻** next to the Configuration heading |
+| Read live toolsets from the installed server | Click **⟳ from server** next to the Toolsets heading |
+
+### Built-in catalog vs. live discovery
+
+The Toolsets list defaults to a **built-in catalog** bundled with the extension. Click **⟳ from server** to replace it with the toolsets, tools and GA/non-GA status read from the `@salesforce/mcp` server **actually installed on your machine** (via `npx -y @salesforce/mcp`). This requires a default org (`sf org display`) and can take ~30s the first time while `npx` downloads the package.
+
+How it works: the extension speaks the MCP stdio protocol directly. Because `tools/list` is flat (no toolset grouping or GA flag), the extension probes each toolset individually for membership and diffs a full `--toolsets all` run **with vs. without** `--allow-non-ga-tools` to classify GA vs. non-GA. If discovery fails for any reason, the built-in catalog stays in place. The source indicator under the Toolsets heading shows which list is active (`○ Built-in` / `● Live`).
 
 ---
 
