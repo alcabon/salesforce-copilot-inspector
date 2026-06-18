@@ -545,7 +545,7 @@ const MCP_TOOLSETS: McpToolset[] = [
 	{ name: 'data',               alwaysOn: false, label: 'Data',               description: 'Run SOQL queries against the connected org.',                                                                            nonGaTools: [],                                                                                                                                                         tools: ['run_soql_query'] },
 	{ name: 'users',              alwaysOn: false, label: 'Users',              description: 'User management: assign permission sets to org users.',                                                                   nonGaTools: [],                                                                                                                                                         tools: ['assign_permission_set'] },
 	{ name: 'testing',            alwaysOn: false, label: 'Testing',            description: 'Run Apex unit tests and Agent (bot) tests against the org.',                                                             nonGaTools: [],                                                                                                                                                         tools: ['run_apex_test', 'run_agent_test'] },
-	{ name: 'code-analysis',      alwaysOn: false, label: 'Code Analysis',      description: 'Static analysis with Salesforce Code Analyzer: run rules, list/describe rules, query results, create custom rules (non-GA) and XPath prompts (non-GA).', nonGaTools: ['create-custom-rule', 'generate_xpath_prompt'],                                                                tools: ['run_code_analyzer', 'list_code_analyzer_rules', 'describe_code_analyzer_rule', 'query_code_analyzer_results', 'create-custom-rule', 'generate_xpath_prompt'] },
+	{ name: 'code-analysis',      alwaysOn: false, label: 'Code Analysis',      description: 'Static analysis with Salesforce Code Analyzer: run rules, list/describe rules, query results, create custom rules (non-GA) and XPath generation (non-GA).', nonGaTools: ['create_custom_rule', 'get_ast_nodes_to_generate_xpath'],                                                       tools: ['run_code_analyzer', 'list_code_analyzer_rules', 'describe_code_analyzer_rule', 'query_code_analyzer_results', 'create_custom_rule', 'get_ast_nodes_to_generate_xpath'] },
 	{ name: 'aura-experts',       alwaysOn: false, label: 'Aura Experts',       description: 'Aura component analysis and guided Aura→LWC migration.',                                                                 nonGaTools: [],                                                                                                                                                         tools: ['create_aura_blueprint_draft', 'enhance_aura_blueprint_draft', 'orchestrate_aura_migration', 'transition_prd_to_lwc'] },
 	{ name: 'lwc-experts',        alwaysOn: false, label: 'LWC Experts',        description: '40+ tools for LWC component authoring, design, LDS guidance, SLDS v2 uplift and migration. Several tools are non-GA.',  nonGaTools: ['explore_slds_blueprints', 'guide_slds_blueprints', 'guide_utam_generation', 'guide_slds_styling', 'explore_slds_styling', 'orchestrate_lwc_slds2_uplift'], tools: ['create_lwc_component', 'enhance_lwc_component', 'apply_lds_guidelines', 'orchestrate_lwc_workflow', 'explore_slds_blueprints', 'guide_slds_blueprints', 'guide_utam_generation', 'guide_slds_styling', 'explore_slds_styling', 'orchestrate_lwc_slds2_uplift', '…36 more GA tools'] },
 	{ name: 'mobile',             alwaysOn: false, label: 'Mobile',             description: 'Mobile development: 13+ device-feature tools (barcode, biometrics, calendar, contacts, document scanner, geofencing, location, NFC, payments, AR, offline analysis).', nonGaTools: [],                                                                                                    tools: ['barcode_scanner', 'biometrics', 'calendar', 'contacts', 'document_scanner', 'geofencing', 'location', 'nfc', 'payments', 'offline_analysis', '…3 more'] },
@@ -561,8 +561,8 @@ const MCP_NONGA_INFO: Record<string, string> = {
 	'delete_org':                   'Permanently delete a scratch org or sandbox.',
 	'open_org':                     'Open the default or specified Salesforce org in a browser.',
 	'create_org_snapshot':          'Create a snapshot of an existing org configuration for reuse.',
-	'create-custom-rule':           'Create a custom static-analysis rule for Code Analyzer using XPath expressions.',
-	'generate_xpath_prompt':        'Generate an XPath prompt to assist in authoring custom Code Analyzer rules.',
+	'create_custom_rule':           'Create a custom static-analysis rule for Code Analyzer using XPath expressions.',
+	'get_ast_nodes_to_generate_xpath': 'Get AST nodes to help author the XPath for a custom Code Analyzer rule.',
 	'enrich_metadata':              'Enrich Salesforce metadata with deeper semantic context to improve LLM response quality.',
 	'explore_slds_blueprints':      'Explore SLDS (Salesforce Lightning Design System) component blueprints and guidelines.',
 	'guide_slds_blueprints':        'Receive LLM-guided walkthroughs for implementing SLDS component blueprints.',
@@ -1078,6 +1078,25 @@ function checkMcpConfig(workspaceRoot?: string): McpFileResult[] {
 	});
 }
 
+// Extract the launch command/args for the @salesforce/mcp entry in a config
+// file, so we can spawn the exact server the user configured (not a
+// reconstructed one) for the "Run Server" feature.
+function readMcpServerLaunchSpec(filePath: string): { command: string; args: string[] } | null {
+	if (!fileExists(filePath)) { return null; }
+	try {
+		const raw = fs.readFileSync(filePath, 'utf8');
+		const parsed = JSON.parse(stripJsonComments(raw)) as Record<string, unknown>;
+		const serverMap = (parsed.mcpServers ?? parsed.servers ?? {}) as Record<string, { command?: string; args?: string[] }>;
+		for (const cfg of Object.values(serverMap)) {
+			const args = cfg.args ?? [];
+			if (args.some(a => a.includes('@salesforce/mcp'))) {
+				return { command: cfg.command ?? 'npx', args };
+			}
+		}
+	} catch { /* fall through */ }
+	return null;
+}
+
 // ---------------------------------------------------------------------------
 
 async function runAllChecks(): Promise<CheckResult[]> {
@@ -1394,8 +1413,28 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 	private _toolsetSource: 'live' | 'builtin' = 'builtin';
 	private _discoveredAt?: number;
 	private _discovering = false;
+	// "Run Server" — manually-launched, long-lived test instances of a
+	// configured @salesforce/mcp server, keyed by the config file's full path.
+	private _runningServers: Map<string, { child: child_process.ChildProcess; intentionalStop: boolean }> = new Map();
+	private _mcpOutput?: vscode.OutputChannel;
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
+
+	private get mcpOutput(): vscode.OutputChannel {
+		if (!this._mcpOutput) {
+			this._mcpOutput = vscode.window.createOutputChannel('Salesforce MCP — Run Server');
+		}
+		return this._mcpOutput;
+	}
+
+	// Kill any manually-launched servers when the extension deactivates.
+	public disposeRunningServers(): void {
+		for (const { child } of this._runningServers.values()) {
+			try { child.kill(); } catch { /* ignore */ }
+		}
+		this._runningServers.clear();
+		this._mcpOutput?.dispose();
+	}
 
 	public resolveWebviewView(
 		webviewView: vscode.WebviewView,
@@ -1478,6 +1517,12 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 				case 'checkMcpServer':
 					this._checkMcpServer(webviewView.webview, data.path as string);
 					break;
+				case 'runMcpServer':
+					await this._runMcpServer(webviewView.webview, data.path as string);
+					break;
+				case 'stopMcpServer':
+					this._stopMcpServer(webviewView.webview, data.path as string);
+					break;
 				case 'installMcp':
 					await this._handleInstallMcp(
 						webviewView.webview,
@@ -1523,6 +1568,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 			mcpNonGaInfo: this._liveNonGaInfo ?? MCP_NONGA_INFO,
 			mcpToolsetSource: this._toolsetSource,
 			mcpDiscoveredAt: this._discoveredAt,
+			mcpRunningPaths: Array.from(this._runningServers.keys()),
 		});
 	}
 
@@ -1700,6 +1746,169 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 		}
 
 		reply(true, `${orgStatus.label} · Node.js ${nodeVer} ✓`);
+	}
+
+	// Launch the exact @salesforce/mcp server configured in `filePath` as a
+	// long-lived foreground process, do the MCP initialize handshake to
+	// confirm it actually came up, then leave it running until stopped (or
+	// the extension deactivates).
+	private async _runMcpServer(webview: vscode.Webview, filePath: string): Promise<void> {
+		// Combined diagnostic log (launch line + stderr + non-JSON stdout), capped,
+		// echoed both to the Output channel and — on failure — into the webview.
+		let logBuf = '';
+		const appendLog = (s: string): void => { logBuf = (logBuf + s).slice(-8000); };
+		const reply = (state: 'starting' | 'running' | 'stopped' | 'error', message: string, withLog = false): void => {
+			webview.postMessage({ type: 'mcpServerRunStatus', path: filePath, state, message, log: withLog ? logBuf : undefined });
+		};
+
+		if (!filePath) { return; }
+		if (this._runningServers.has(filePath)) {
+			reply('running', 'Already running.');
+			return;
+		}
+
+		const spec = readMcpServerLaunchSpec(filePath);
+		if (!spec) {
+			reply('error', 'Could not find a @salesforce/mcp server entry in this config file.');
+			return;
+		}
+
+		reply('starting', 'Launching @salesforce/mcp… first run can take ~30s while npx downloads it.');
+
+		const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+		const isWin = process.platform === 'win32';
+		const cmd = isWin && spec.command === 'npx' ? 'npx.cmd' : spec.command;
+
+		const out = this.mcpOutput;
+		const launchLine = `$ ${cmd} ${spec.args.join(' ')}`;
+		out.appendLine(`\n[${new Date().toLocaleTimeString()}] launching: ${cmd} ${spec.args.join(' ')}`);
+		out.appendLine(`  cwd: ${cwd}`);
+		appendLog(`${launchLine}\n`);
+
+		let child: child_process.ChildProcess;
+		try {
+			// shell:true on Windows so the npx.cmd shim resolves. Pass the args as
+			// one pre-joined string so cmd.exe doesn't re-tokenize comma-separated
+			// values (e.g. `--toolsets users,testing`) into separate arguments.
+			child = isWin
+				? child_process.spawn(`${cmd} ${spec.args.join(' ')}`, { cwd, windowsHide: true, shell: true })
+				: child_process.spawn(cmd, spec.args, { cwd, windowsHide: true });
+		} catch (e) {
+			out.appendLine(`  spawn failed: ${String(e)}`);
+			appendLog(`spawn failed: ${String(e)}\n`);
+			reply('error', `Failed to launch: ${String(e)}`, true);
+			return;
+		}
+		if (!child.stdin || !child.stdout || !child.stderr) {
+			reply('error', 'Failed to attach to server stdio.');
+			try { child.kill(); } catch { /* ignore */ }
+			return;
+		}
+
+		this._runningServers.set(filePath, { child, intentionalStop: false });
+
+		let settled = false;
+		let live = false;   // once running, stream subsequent output to the webview
+		let buf = '';
+		let stderrTail = '';
+		const streamLog = (chunk: string): void => {
+			appendLog(chunk);
+			if (live) { webview.postMessage({ type: 'mcpServerLog', path: filePath, chunk }); }
+		};
+		const handshakeTimer = setTimeout(() => {
+			if (settled) { return; }
+			settled = true;
+			reply('error', 'Server did not respond to the MCP handshake within 45s.', true);
+			out.show(true);
+		}, 45000);
+
+		const send = (msg: JsonRpcMessage) => {
+			try { child.stdin?.write(JSON.stringify(msg) + '\n'); } catch { /* ignore */ }
+		};
+
+		child.stderr.setEncoding('utf8');
+		child.stderr.on('data', (chunk: string) => {
+			stderrTail = (stderrTail + chunk).slice(-4000);
+			streamLog(chunk);
+			out.append(chunk);
+		});
+
+		child.stdout.setEncoding('utf8');
+		child.stdout.on('data', (chunk: string) => {
+			buf += chunk;
+			let nl: number;
+			while ((nl = buf.indexOf('\n')) !== -1) {
+				const line = buf.slice(0, nl).trim();
+				buf = buf.slice(nl + 1);
+				if (!line) { continue; }
+				let msg: JsonRpcMessage;
+				try { msg = JSON.parse(line) as JsonRpcMessage; } catch { streamLog(line + '\n'); out.appendLine(line); continue; }
+				if (msg.id === 1 && !settled) {
+					settled = true;
+					clearTimeout(handshakeTimer);
+					if (msg.error) {
+						reply('error', `Handshake failed — ${JSON.stringify(msg.error)}`, true);
+						out.show(true);
+						try { child.kill(); } catch { /* ignore */ }
+						continue;
+					}
+					send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+					out.appendLine(`  ✓ MCP handshake complete (pid ${child.pid ?? '?'})`);
+					appendLog(`✓ MCP handshake complete (pid ${child.pid ?? '?'})\n`);
+					reply('running', `Running (pid ${child.pid ?? '?'}).`, true);
+					live = true;
+				}
+			}
+		});
+
+		// First meaningful (non-blank) line of stderr, for the inline message.
+		const firstErrLine = (): string => {
+			const line = stderrTail.split('\n').map(s => s.trim()).filter(Boolean).pop();
+			return line ? ` — ${line}` : '';
+		};
+
+		child.on('error', (err) => {
+			clearTimeout(handshakeTimer);
+			this._runningServers.delete(filePath);
+			out.appendLine(`  process error: ${err.message}`);
+			appendLog(`process error: ${err.message}\n`);
+			reply('error', `Process error: ${err.message}`, true);
+		});
+		child.on('exit', (code) => {
+			clearTimeout(handshakeTimer);
+			const wasIntentional = this._runningServers.get(filePath)?.intentionalStop ?? false;
+			this._runningServers.delete(filePath);
+			out.appendLine(`  process exited (code ${code ?? '?'})`);
+			if (wasIntentional) {
+				reply('stopped', 'Stopped.');
+			} else if (!settled) {
+				reply('error', `Server exited before the handshake (code ${code ?? '?'})${firstErrLine()}`, true);
+				out.show(true);
+			} else {
+				reply('stopped', `Server exited (code ${code ?? '?'}).`);
+			}
+		});
+
+		send({
+			jsonrpc: '2.0',
+			id: 1,
+			method: 'initialize',
+			params: {
+				protocolVersion: '2024-11-05',
+				capabilities: {},
+				clientInfo: { name: 'salesforce-github-copilot', version: '1.0.0' },
+			},
+		});
+	}
+
+	private _stopMcpServer(webview: vscode.Webview, filePath: string): void {
+		const entry = this._runningServers.get(filePath);
+		if (!entry) {
+			webview.postMessage({ type: 'mcpServerRunStatus', path: filePath, state: 'stopped', message: 'Not running.' });
+			return;
+		}
+		entry.intentionalStop = true;
+		try { entry.child.kill(); } catch { /* ignore */ }
 	}
 
 	private async _handleInstallMcp(
@@ -2009,6 +2218,37 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .mcp-check-status { margin-top: 2px; }
     .mcp-status-ok  { color: var(--vscode-testing-iconPassed, #4ec9b0); }
     .mcp-status-err { color: var(--vscode-testing-iconFailed, #f48771); }
+    /* ── MCP "Run Server" ─────────────────────────────── */
+    .mcp-run-badge {
+      font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+      text-transform: uppercase; letter-spacing: 0.03em; margin-left: 4px;
+    }
+    .mcp-run-badge.idle     { background: rgba(128,128,128,.12); color: var(--vscode-descriptionForeground); border: 1px solid rgba(128,128,128,.25); }
+    .mcp-run-badge.starting { background: rgba(0,122,204,.12);   color: #4fc1ff; border: 1px solid rgba(0,122,204,.3); }
+    .mcp-run-badge.running  { background: rgba(78,201,176,.15);  color: #4ec9b0; border: 1px solid rgba(78,201,176,.35); }
+    .mcp-run-badge.error    { background: rgba(244,135,113,.12); color: #f48771; border: 1px solid rgba(244,135,113,.35); }
+    .btn-run-mcp {
+      font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
+      background: transparent; border: 1px solid rgba(78,201,176,.55);
+      color: #4ec9b0; cursor: pointer; vertical-align: middle;
+      letter-spacing: 0.04em; margin-left: 4px;
+    }
+    .btn-run-mcp:hover { background: rgba(78,201,176,.12); }
+    .btn-run-mcp:disabled { opacity: 0.5; cursor: default; }
+    .mcp-run-msg { margin-top: 2px; }
+    .mcp-run-log { margin-top: 4px; }
+    .mcp-run-log summary {
+      font-size: 10px; cursor: pointer; color: var(--vscode-textLink-foreground, #4fc1ff);
+      user-select: none; margin-bottom: 3px;
+    }
+    .mcp-run-log-pre {
+      margin: 0; padding: 6px 8px; max-height: 220px; overflow: auto;
+      font-family: var(--vscode-editor-font-family, monospace); font-size: 10px;
+      line-height: 1.4; white-space: pre-wrap; word-break: break-word;
+      background: var(--vscode-textCodeBlock-background, rgba(0,0,0,.25));
+      border: 1px solid var(--vscode-panel-border, #333); border-radius: 4px;
+      color: var(--vscode-foreground);
+    }
     .mcp-quickstart {
       margin: 10px 0 4px 0; padding: 8px 10px;
       background: rgba(0,122,204,0.08);
@@ -2226,6 +2466,11 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
         renderCreators(data.personalCreators, 'personal-creator-list');
         _mcpSource = data.mcpToolsetSource || 'builtin';
         _mcpDiscoveredAt = data.mcpDiscoveredAt || null;
+        // Rehydrate "Running" badges after a webview reload — the provider's
+        // child processes outlive the view, the JS-side cache does not.
+        (data.mcpRunningPaths || []).forEach(p => {
+          _mcpRunCache[p] = { state: 'running', message: _mcpRunCache[p] && _mcpRunCache[p].message || 'Running.' };
+        });
         renderMcp(data.mcpFiles, data.mcpToolsets, data.mcpNonGaInfo);
       } else if (data.type === 'checkSkillResult') {
         const icon = data.status === 'ok' ? '✓' : data.status === 'warn' ? '⚠' : '✗';
@@ -2249,6 +2494,15 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
           const body = row.querySelector('.check-body');
           if (body) { body.appendChild(statusDiv); }
         }
+      } else if (data.type === 'mcpServerRunStatus') {
+        const prevLog = _mcpRunCache[data.path] && _mcpRunCache[data.path].log;
+        const keepPrev = data.state === 'error' || data.state === 'running';
+        _mcpRunCache[data.path] = { state: data.state, message: data.message, log: data.log != null ? data.log : (keepPrev ? prevLog : undefined) };
+        updateMcpRunUi(data.path);
+      } else if (data.type === 'mcpServerLog') {
+        const info = _mcpRunCache[data.path];
+        if (info) { info.log = (info.log || '') + data.chunk; }
+        appendMcpRunLog(data.path, data.chunk);
       } else if (data.type === 'mcpDiscoverStatus') {
         const st = document.getElementById('mcp-discover-status');
         if (st) {
@@ -2397,6 +2651,72 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     let _mcpNonGaInfo = {};
     let _mcpSource = 'builtin';
     let _mcpDiscoveredAt = null;
+    let _mcpRunCache = {};   // fullPath -> { state: 'idle'|'starting'|'running'|'stopped'|'error', message }
+
+    function mcpRunBadgeParts(info) {
+      if (info.state === 'starting') { return { cls: 'starting', icon: '◐', label: 'Starting…' }; }
+      if (info.state === 'running')  { return { cls: 'running',  icon: '●', label: 'Running' }; }
+      if (info.state === 'error')    { return { cls: 'error',    icon: '✗', label: 'Error' }; }
+      if (info.state === 'stopped')  { return { cls: 'idle',     icon: '○', label: 'Stopped' }; }
+      return { cls: 'idle', icon: '○', label: 'Not running' };
+    }
+
+    // Collapsible "Server log" panel — auto-expanded on error, collapsed (but
+    // present) while running so it stays available without cluttering the view.
+    function mcpLogDetailsHtml(info) {
+      const open = info.state === 'error' ? ' open' : '';
+      const label = info.state === 'running' ? 'Server log (live)' : 'Server log';
+      return '<details' + open + '><summary>' + label + '</summary><pre class="mcp-run-log-pre">' + esc(info.log || '') + '</pre></details>';
+    }
+
+    // Live-append a stdout/stderr chunk to a running server's log panel.
+    function appendMcpRunLog(filePath, chunk) {
+      const logWrap = Array.from(document.querySelectorAll('.mcp-run-log')).find(e => e.dataset.runPath === filePath);
+      if (!logWrap) { return; }
+      const pre = logWrap.querySelector('.mcp-run-log-pre');
+      if (!pre) {
+        // Panel not built yet — rebuild from cache (which already includes chunk).
+        const info = _mcpRunCache[filePath];
+        if (info && info.log) { logWrap.style.display = ''; logWrap.innerHTML = mcpLogDetailsHtml(info); }
+        return;
+      }
+      const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 30;
+      pre.appendChild(document.createTextNode(chunk));
+      if (nearBottom) { pre.scrollTop = pre.scrollHeight; }
+    }
+
+    // Patch the badge/button/message for one server row in place, without a
+    // full re-render — keeps focus/scroll stable while a server is starting.
+    function updateMcpRunUi(filePath) {
+      const info = _mcpRunCache[filePath] || { state: 'idle' };
+      const parts = mcpRunBadgeParts(info);
+      const badge = Array.from(document.querySelectorAll('.mcp-run-badge')).find(e => e.dataset.runPath === filePath);
+      if (badge) {
+        badge.className = 'mcp-run-badge ' + parts.cls;
+        badge.textContent = parts.icon + ' ' + parts.label;
+      }
+      const btn = Array.from(document.querySelectorAll('.btn-run-mcp')).find(e => e.dataset.path === filePath);
+      if (btn) {
+        btn.textContent = info.state === 'running' ? 'Stop Server' : (info.state === 'starting' ? 'Starting…' : 'Run Server');
+        btn.disabled = info.state === 'starting';
+      }
+      const msgDiv = Array.from(document.querySelectorAll('.mcp-run-msg')).find(e => e.dataset.runPath === filePath);
+      if (msgDiv) {
+        msgDiv.textContent = info.message || '';
+        msgDiv.className = 'mcp-run-msg check-msg' + (info.state === 'error' ? ' mcp-status-err' : info.state === 'running' ? ' mcp-status-ok' : '');
+      }
+      const logWrap = Array.from(document.querySelectorAll('.mcp-run-log')).find(e => e.dataset.runPath === filePath);
+      if (logWrap) {
+        if (info.log) {
+          logWrap.style.display = '';
+          logWrap.innerHTML = mcpLogDetailsHtml(info);
+        } else {
+          logWrap.style.display = 'none';
+          logWrap.innerHTML = '';
+        }
+      }
+    }
+
     function renderMcp(files, toolsets, nonGaInfo) {
       if (!files || !toolsets) { return; }
       if (nonGaInfo) { _mcpNonGaInfo = nonGaInfo; }
@@ -2413,13 +2733,18 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
         const dotCls  = !f.exists ? 's-info' : f.hasSalesforceMcp ? 's-ok' : 's-warn';
         const dotIcon = !f.exists ? '·'      : f.hasSalesforceMcp ? '✓'    : '○';
         const scopeCls = f.scope === 'personal' ? 'scope-home' : 'scope-ws';
+        const showRun = f.exists && f.hasSalesforceMcp;
+        const runInfo = _mcpRunCache[f.fullPath] || { state: 'idle' };
+        const runParts = mcpRunBadgeParts(runInfo);
         html += '<div class="mcp-file-row" data-path="' + esc(f.fullPath || '') + '">';
         html += '<span class="dot ' + dotCls + '">' + dotIcon + '</span>';
         html += '<div class="check-body">';
         html += '<div class="check-name">' + esc(f.relPath) +
                 ' <span class="scope-badge ' + scopeCls + '">' + esc(f.scope) + '</span>' +
+                (showRun ? ' <span class="mcp-run-badge ' + runParts.cls + '" data-run-path="' + esc(f.fullPath) + '">' + runParts.icon + ' ' + esc(runParts.label) + '</span>' : '') +
                 (f.exists ? ' <button class="btn-show-file" data-path="' + esc(f.fullPath) + '">SHOW</button>' : '') +
                 (f.exists && f.hasSalesforceMcp ? ' <button class="btn-check-mcp" data-path="' + esc(f.fullPath) + '">CHECK</button>' : '') +
+                (showRun ? ' <button class="btn-run-mcp" data-path="' + esc(f.fullPath) + '"' + (runInfo.state === 'starting' ? ' disabled' : '') + '>' + esc(runInfo.state === 'running' ? 'Stop Server' : (runInfo.state === 'starting' ? 'Starting…' : 'Run Server')) + '</button>' : '') +
                 '</div>';
         if (!f.exists) {
           html += '<div class="check-msg">not found</div>';
@@ -2434,6 +2759,14 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
             if (srv.tools && srv.tools.length) { detail += ' &nbsp;&middot;&nbsp; tools: ' + esc(srv.tools.join(', ')); }
             html += '<div class="check-msg">' + detail + '</div>';
           }
+        }
+        if (showRun) {
+          const runMsgCls = runInfo.state === 'error' ? ' mcp-status-err' : runInfo.state === 'running' ? ' mcp-status-ok' : '';
+          html += '<div class="mcp-run-msg check-msg' + runMsgCls + '" data-run-path="' + esc(f.fullPath) + '">' + esc(runInfo.message || '') + '</div>';
+          const logStyle = runInfo.log ? '' : 'display:none';
+          html += '<div class="mcp-run-log" data-run-path="' + esc(f.fullPath) + '" style="' + logStyle + '">';
+          if (runInfo.log) { html += mcpLogDetailsHtml(runInfo); }
+          html += '</div>';
         }
         html += '</div></div>';
       }
@@ -2570,6 +2903,21 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
           btn.textContent = '…';
           btn.disabled = true;
           vscode.postMessage({ type: 'checkMcpServer', path: btn.dataset.path });
+        });
+      });
+
+      // Run Server / Stop Server buttons
+      root.querySelectorAll('.btn-run-mcp').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const p = btn.dataset.path;
+          const info = _mcpRunCache[p] || { state: 'idle' };
+          if (info.state === 'running') {
+            vscode.postMessage({ type: 'stopMcpServer', path: p });
+          } else if (info.state !== 'starting') {
+            _mcpRunCache[p] = { state: 'starting', message: 'Starting…' };
+            updateMcpRunUi(p);
+            vscode.postMessage({ type: 'runMcpServer', path: p });
+          }
         });
       });
 
@@ -4332,6 +4680,10 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 	context.subscriptions.push({
 		dispose: () => SummaryPanel.currentPanel?.dispose(),
+	});
+	// Kill any "Run Server" test instances when the extension deactivates.
+	context.subscriptions.push({
+		dispose: () => provider.disposeRunningServers(),
 	});
 }
 

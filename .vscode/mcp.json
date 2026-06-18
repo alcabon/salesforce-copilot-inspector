@@ -11,7 +11,7 @@
         "--toolsets",
         "users,testing",
         "--tools",
-        "create_scratch_org,delete_org,open_org,create_org_snapshot,create-custom-rule,generate_xpath_prompt,explore_slds_blueprints,guide_slds_blueprints,guide_utam_generation,guide_slds_styling,explore_slds_styling,orchestrate_lwc_slds2_uplift,enrich_metadata",
+        "create_scratch_org,delete_org,open_org,create_org_snapshot,create_custom_rule,get_ast_nodes_to_generate_xpath,explore_slds_blueprints,guide_slds_blueprints,guide_utam_generation,guide_slds_styling,explore_slds_styling,orchestrate_lwc_slds2_uplift,enrich_metadata",
         "--allow-non-ga-tools"
       ]
     }
