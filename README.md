@@ -1,4 +1,4 @@
-# Salesforce Github Copilot
+# Salesforce Copilot Inspector
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%3E%3D1.120-blue?logo=visualstudiocode)](https://code.visualstudio.com/)
@@ -29,7 +29,7 @@ code --install-extension salesforce-github-copilot-0.1.0.vsix
 
 Or via the VS Code UI: open the Extensions side-bar (`Ctrl+Shift+P` → **Extensions: Install from VSIX…**) and browse to the downloaded file.
 
-**3. Reload VS Code** when prompted — the **Salesforce Github Copilot** icon <img width="43" height="41" alt="image" src="https://github.com/user-attachments/assets/7b806915-c486-4728-a1d2-d4a784b47e4e" />
+**3. Reload VS Code** when prompted — the **Salesforce Copilot Inspector** icon <img width="43" height="41" alt="image" src="https://github.com/user-attachments/assets/7b806915-c486-4728-a1d2-d4a784b47e4e" />
   will appear in the Activity Bar.
 
 ---
@@ -42,7 +42,7 @@ Or via the VS Code UI: open the Extensions side-bar (`Ctrl+Shift+P` → **Extens
 
 ## Overview
 
-**Salesforce Github Copilot** gives you a live dashboard for everything Copilot-related in your workspace. Four sidebar tabs let you inspect what is configured, create new files from templates, manage personal files stored in your user profile, and configure the Salesforce DX MCP server. Two full editor panels handle the Salesforce Skills Library and skill spec validation.
+**Salesforce Copilot Inspector** gives you a live dashboard for everything Copilot-related in your workspace. Four sidebar tabs let you inspect what is configured, create new files from templates, manage personal files stored in your user profile, and configure the Salesforce DX MCP server. Two full editor panels handle the Salesforce Skills Library and skill spec validation.
 
 ---
 
@@ -216,7 +216,7 @@ Installed skills are marked with a `✓ installed` badge and the Install button 
 ## Getting Started
 
 1. Open a workspace in VS Code.
-2. Click the **Salesforce Github Copilot** icon in the Activity Bar (left sidebar).
+2. Click the **Salesforce Copilot Inspector** icon in the Activity Bar (left sidebar).
 3. The **Checks** tab runs automatically and shows the current state of your configuration.
 4. Switch to **Create (Workspace)** or **Create (Personal)** to scaffold new files.
 5. Click **check** on any skill to open the Skill Validation Report.
@@ -278,13 +278,13 @@ The `code` CLI is bundled with VS Code. On Windows it may need to be added to `P
 
 ### 3. Reload VS Code
 
-After installation VS Code will prompt **Reload Window** — click it, or run **Developer: Reload Window** from the Command Palette. The **Salesforce Github Copilot** icon will then appear in the Activity Bar.
+After installation VS Code will prompt **Reload Window** — click it, or run **Developer: Reload Window** from the Command Palette. The **Salesforce Copilot Inspector** icon will then appear in the Activity Bar.
 
 ---
 
 ### Uninstall
 
-Open the Extensions side-bar, search for **Salesforce Github Copilot**, click the gear icon, and choose **Uninstall**.
+Open the Extensions side-bar, search for **Salesforce Copilot Inspector**, click the gear icon, and choose **Uninstall**.
 
 ---
 
