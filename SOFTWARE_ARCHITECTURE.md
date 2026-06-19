@@ -18,7 +18,7 @@
 
 ## 1. Overview
 
-**Salesforce Github Copilot** is a VS Code extension that audits and configures GitHub Copilot and Salesforce AI tooling in a workspace. It exposes a sidebar with four tabs and two full editor panels.
+**Salesforce Github Inspector** is a VS Code extension that audits and configures GitHub Copilot and Salesforce AI tooling in a workspace. It exposes a sidebar with four tabs and two full editor panels.
 
 ```mermaid
 graph TD

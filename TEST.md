@@ -1,4 +1,4 @@
-# Test Suite — Salesforce Github Copilot
+# Test Suite — Salesforce Github Inspector
 
 56 tests across 6 suites. All tests run inside the VS Code extension host via `@vscode/test-cli` / `@vscode/test-electron` and target the compiled output at `out/test/**/*.test.js`.
 

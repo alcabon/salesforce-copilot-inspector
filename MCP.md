@@ -87,7 +87,7 @@ Replace `user@org.com` with the output of `sf org display --json | jq .result.us
 
 #### Path C — This extension's MCP tab (visual selector)
 
-1. Open the **Salesforce Github Copilot** sidebar (Activity Bar)
+1. Open the **Salesforce Github Inspector** sidebar (Activity Bar)
 2. Switch to the **MCP** tab
 3. Check the toolsets you need
 4. Click **Install for Workspace (VS Code)** — the extension writes `.vscode/mcp.json` automatically
@@ -429,13 +429,13 @@ This configuration:
 - Exposes the `users` and `testing` toolsets
 - Enables non-GA tools (pilot / beta features)
 
-To update it from within VS Code, open the **MCP tab** in the Salesforce Github Copilot sidebar, select the desired toolsets and tools, then click **Install for Workspace (VS Code)**.
+To update it from within VS Code, open the **MCP tab** in the Salesforce Github Inspector sidebar, select the desired toolsets and tools, then click **Install for Workspace (VS Code)**.
 
 ---
 
 ## 7. Managing servers from the extension
 
-The **MCP tab** in the Salesforce Github Copilot sidebar provides a GUI for the operations above:
+The **MCP tab** in the Salesforce Github Inspector sidebar provides a GUI for the operations above:
 
 | Action | How |
 |---|---|
