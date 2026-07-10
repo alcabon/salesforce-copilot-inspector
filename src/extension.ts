@@ -2035,7 +2035,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     body {
       margin: 0; padding: 0;
       font-family: var(--vscode-font-family);
-      font-size: var(--vscode-font-size);
+      font-size: calc(var(--vscode-font-size) + 2px);
       color: var(--vscode-foreground);
       min-width: 260px;
     }
@@ -2049,7 +2049,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .tab-bar::-webkit-scrollbar { display: none; }
     .tab {
       padding: 7px 9px 6px 9px;
-      font-size: 11px; font-weight: 500;
+      font-size: 13px; font-weight: 500;
       cursor: pointer;
       border-bottom: 2px solid transparent;
       color: var(--vscode-foreground);
@@ -2066,7 +2066,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       justify-content: space-between;
       padding: 7px 0 4px 0;
     }
-    .summary { display: flex; gap: 10px; font-size: 11px; }
+    .summary { display: flex; gap: 10px; font-size: 13px; }
     .sum-num { font-weight: 700; }
     .sum-ok   { color: #4ec9b0; }
     .sum-warn { color: #f0c040; }
@@ -2076,12 +2076,12 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       background: none; border: none;
       color: var(--vscode-icon-foreground);
       cursor: pointer; padding: 2px 4px;
-      border-radius: 3px; font-size: 15px; line-height: 1;
+      border-radius: 3px; font-size: 17px; line-height: 1;
     }
     .btn-icon:hover { background: var(--vscode-toolbar-hoverBackground); }
     /* ── category headers ─────────────────────────────────── */
     .cat-header {
-      font-size: 10px; font-weight: 700;
+      font-size: 12px; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.08em;
       color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-foreground));
       margin: 12px 0 3px 0; padding-bottom: 3px;
@@ -2096,20 +2096,20 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .check.link { cursor: pointer; }
     .check.link:hover { background: var(--vscode-list-hoverBackground); }
     .check.link:hover .check-name { color: var(--vscode-textLink-foreground); }
-    .dot { flex-shrink: 0; width: 14px; text-align: center; margin-top: 1px; font-size: 13px; line-height: 1.2; }
+    .dot { flex-shrink: 0; width: 14px; text-align: center; margin-top: 1px; font-size: 15px; line-height: 1.2; }
     .s-ok      { color: #4ec9b0; }
     .s-warn    { color: #f0c040; }
     .s-missing { color: #f14c4c; }
     .s-info    { color: var(--vscode-descriptionForeground); }
     .check-body { flex: 1; min-width: 0; }
-    .check-name { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .check-msg  { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .scope-badge { flex-shrink: 0; font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; letter-spacing: 0.03em; text-transform: uppercase; vertical-align: middle; margin-left: 5px; }
+    .check-name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .check-msg  { font-size: 13px; color: var(--vscode-descriptionForeground); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .scope-badge { flex-shrink: 0; font-size: 11px; font-weight: 700; padding: 1px 5px; border-radius: 3px; letter-spacing: 0.03em; text-transform: uppercase; vertical-align: middle; margin-left: 5px; }
     .scope-ws   { background: rgba(0,122,204,0.15); color: #4fc1ff; border: 1px solid rgba(0,122,204,0.3); }
     .scope-home { background: rgba(180,100,220,0.15); color: #d7a0f7; border: 1px solid rgba(180,100,220,0.3); }
-    .btn-delete { flex-shrink: 0; font-size: 10px; padding: 1px 6px; border-radius: 3px; border: 1px solid rgba(241,76,76,0.4); background: rgba(241,76,76,0.1); color: #f14c4c; cursor: pointer; margin-left: 5px; vertical-align: middle; line-height: 1.4; }
+    .btn-delete { flex-shrink: 0; font-size: 12px; padding: 1px 6px; border-radius: 3px; border: 1px solid rgba(241,76,76,0.4); background: rgba(241,76,76,0.1); color: #f14c4c; cursor: pointer; margin-left: 5px; vertical-align: middle; line-height: 1.4; }
     .btn-delete:hover { background: rgba(241,76,76,0.25); border-color: #f14c4c; }
-    .btn-check { flex-shrink: 0; font-size: 10px; padding: 1px 6px; border-radius: 3px; border: 1px solid rgba(128,128,128,0.35); background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer; margin-left: 5px; vertical-align: middle; line-height: 1.4; }
+    .btn-check { flex-shrink: 0; font-size: 12px; padding: 1px 6px; border-radius: 3px; border: 1px solid rgba(128,128,128,0.35); background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer; margin-left: 5px; vertical-align: middle; line-height: 1.4; }
     .btn-check:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
     .btn-check:disabled { opacity: .5; cursor: not-allowed; }
     .btn-check.ok   { border-color: rgba(78,201,176,.55);  color: #4ec9b0; }
@@ -2117,7 +2117,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .btn-check.err  { border-color: rgba(241,76,76,.55);   color: #f14c4c; }
     /* ── creator cards (create tab) ───────────────────────── */
     .create-intro {
-      font-size: 11px;
+      font-size: 13px;
       color: var(--vscode-descriptionForeground);
       padding: 8px 0 4px 0; line-height: 1.5; margin: 0;
     }
@@ -2132,15 +2132,15 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       background: var(--vscode-list-hoverBackground);
     }
     .creator-icon {
-      flex-shrink: 0; font-size: 18px; width: 26px;
+      flex-shrink: 0; font-size: 20px; width: 26px;
       text-align: center; font-style: normal;
       color: var(--vscode-textLink-foreground, #3794ff);
     }
     .creator-body { flex: 1; min-width: 0; }
-    .creator-label { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .creator-desc  { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 1px; }
+    .creator-label { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .creator-desc  { font-size: 13px; color: var(--vscode-descriptionForeground); margin-top: 1px; }
     .creator-target {
-      font-size: 10px; color: var(--vscode-descriptionForeground);
+      font-size: 12px; color: var(--vscode-descriptionForeground);
       margin-top: 2px; font-family: var(--vscode-editor-font-family, monospace);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
@@ -2150,7 +2150,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     }
     .creator-target a:hover { text-decoration: underline; }
     .btn-create {
-      flex-shrink: 0; font-size: 11px; font-weight: 600;
+      flex-shrink: 0; font-size: 13px; font-weight: 600;
       padding: 3px 10px; border-radius: 3px; cursor: pointer;
       border: 1px solid var(--vscode-button-border, transparent);
       white-space: nowrap;
@@ -2167,7 +2167,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .btn-create.open:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
     /* ── creator section header ───────────────────────────── */
     .creator-section-hdr {
-      font-size: 10px; font-weight: 700;
+      font-size: 12px; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.08em;
       color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-foreground));
       margin: 16px 0 4px 0; padding-bottom: 3px;
@@ -2177,7 +2177,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     /* ── loading ──────────────────────────────────────────── */
     .loading {
       padding: 24px 0; text-align: center;
-      color: var(--vscode-descriptionForeground); font-size: 12px;
+      color: var(--vscode-descriptionForeground); font-size: 14px;
     }
     .spin { display: inline-block; animation: rotate 1s linear infinite; }
     @keyframes rotate { to { transform: rotate(360deg); } }
@@ -2187,7 +2187,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     }
     .btn-summary {
       width: 100%; padding: 5px 10px;
-      font-size: 12px; font-weight: 600;
+      font-size: 14px; font-weight: 600;
       background: var(--vscode-button-background, #0e639c);
       color: var(--vscode-button-foreground, #fff);
       border: none;
@@ -2201,14 +2201,14 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       gap: 7px; padding: 4px 4px; border-radius: 3px;
     }
     .btn-show-file {
-      font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
+      font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
       background: transparent; border: 1px solid var(--vscode-button-border, rgba(128,128,128,.4));
       color: var(--vscode-foreground); cursor: pointer; vertical-align: middle;
       letter-spacing: 0.04em; opacity: 0.7; margin-left: 4px;
     }
     .btn-show-file:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
     .btn-check-mcp {
-      font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
+      font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
       background: transparent; border: 1px solid rgba(0,122,204,.55);
       color: var(--vscode-textLink-foreground, #4fc1ff); cursor: pointer; vertical-align: middle;
       letter-spacing: 0.04em; margin-left: 4px;
@@ -2220,7 +2220,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .mcp-status-err { color: var(--vscode-testing-iconFailed, #f48771); }
     /* ── MCP "Run Server" ─────────────────────────────── */
     .mcp-run-badge {
-      font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+      font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
       text-transform: uppercase; letter-spacing: 0.03em; margin-left: 4px;
     }
     .mcp-run-badge.idle     { background: rgba(128,128,128,.12); color: var(--vscode-descriptionForeground); border: 1px solid rgba(128,128,128,.25); }
@@ -2228,7 +2228,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .mcp-run-badge.running  { background: rgba(78,201,176,.15);  color: #4ec9b0; border: 1px solid rgba(78,201,176,.35); }
     .mcp-run-badge.error    { background: rgba(244,135,113,.12); color: #f48771; border: 1px solid rgba(244,135,113,.35); }
     .btn-run-mcp {
-      font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
+      font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 3px;
       background: transparent; border: 1px solid rgba(78,201,176,.55);
       color: #4ec9b0; cursor: pointer; vertical-align: middle;
       letter-spacing: 0.04em; margin-left: 4px;
@@ -2238,12 +2238,12 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     .mcp-run-msg { margin-top: 2px; }
     .mcp-run-log { margin-top: 4px; }
     .mcp-run-log summary {
-      font-size: 10px; cursor: pointer; color: var(--vscode-textLink-foreground, #4fc1ff);
+      font-size: 12px; cursor: pointer; color: var(--vscode-textLink-foreground, #4fc1ff);
       user-select: none; margin-bottom: 3px;
     }
     .mcp-run-log-pre {
       margin: 0; padding: 6px 8px; max-height: 220px; overflow: auto;
-      font-family: var(--vscode-editor-font-family, monospace); font-size: 10px;
+      font-family: var(--vscode-editor-font-family, monospace); font-size: 12px;
       line-height: 1.4; white-space: pre-wrap; word-break: break-word;
       background: var(--vscode-textCodeBlock-background, rgba(0,0,0,.25));
       border: 1px solid var(--vscode-panel-border, #333); border-radius: 4px;
@@ -2253,12 +2253,12 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       margin: 10px 0 4px 0; padding: 8px 10px;
       background: rgba(0,122,204,0.08);
       border: 1px solid rgba(0,122,204,0.25);
-      border-radius: 4px; font-size: 11px; line-height: 1.6;
+      border-radius: 4px; font-size: 13px; line-height: 1.6;
       color: var(--vscode-foreground);
     }
     .mcp-quickstart code {
       font-family: var(--vscode-editor-font-family, monospace);
-      background: rgba(0,0,0,0.25); padding: 1px 4px; border-radius: 3px; font-size: 10px;
+      background: rgba(0,0,0,0.25); padding: 1px 4px; border-radius: 3px; font-size: 12px;
     }
     .mcp-toolset {
       margin-top: 8px; padding: 7px 8px; border-radius: 4px;
@@ -2269,20 +2269,20 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     }
     .mcp-ts-name {
       font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 11px; font-weight: 700;
+      font-size: 13px; font-weight: 700;
       color: var(--vscode-textLink-foreground, #3794ff);
     }
-    .mcp-ts-label { font-size: 12px; font-weight: 600; }
+    .mcp-ts-label { font-size: 14px; font-weight: 600; }
     .mcp-ts-badge {
-      font-size: 9px; font-weight: 700; padding: 1px 5px;
+      font-size: 11px; font-weight: 700; padding: 1px 5px;
       border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em;
     }
     .mcp-ts-badge.always { background: rgba(78,201,176,.15); color: #4ec9b0; border: 1px solid rgba(78,201,176,.35); }
-    .mcp-ts-desc { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+    .mcp-ts-desc { font-size: 13px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
     .mcp-ts-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
     .mcp-tool {
       font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 10px; padding: 1px 5px; border-radius: 3px;
+      font-size: 12px; padding: 1px 5px; border-radius: 3px;
       background: rgba(128,128,128,0.12);
       border: 1px solid rgba(128,128,128,0.2);
       color: var(--vscode-foreground); white-space: nowrap;
@@ -2306,7 +2306,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap;
     }
     .btn-mcp-install {
-      font-size: 11px; font-weight: 600; padding: 4px 12px;
+      font-size: 13px; font-weight: 600; padding: 4px 12px;
       border-radius: 3px; cursor: pointer; white-space: nowrap;
       background: var(--vscode-button-background, #0078d4);
       color: var(--vscode-button-foreground, #fff);
@@ -2314,7 +2314,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     }
     .btn-mcp-install:hover { background: var(--vscode-button-hoverBackground, #026ec1); }
     .mcp-warn-msg {
-      margin-top: 6px; padding: 5px 8px; font-size: 11px; border-radius: 4px;
+      margin-top: 6px; padding: 5px 8px; font-size: 13px; border-radius: 4px;
       background: rgba(240,192,64,.1); border: 1px solid rgba(240,192,64,.35);
       color: #f0c040; display: none;
     }
@@ -2336,29 +2336,29 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     }
     .mcp-nonga-tool-name {
       font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 11px; font-weight: 700; color: #f0c040;
+      font-size: 13px; font-weight: 700; color: #f0c040;
       display: inline-flex; align-items: center; gap: 6px;
     }
     .mcp-nonga-tool-ts {
-      font-size: 9px; font-weight: 400; opacity: .7;
+      font-size: 11px; font-weight: 400; opacity: .7;
     }
     .mcp-nonga-tool-desc {
-      font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 2px;
+      font-size: 13px; color: var(--vscode-descriptionForeground); margin-top: 2px;
     }
     /* ── MCP allow-non-ga checkbox ────────────────────── */
     .mcp-option-row {
       display: flex; align-items: center; gap: 6px;
-      margin-top: 8px; font-size: 11px;
+      margin-top: 8px; font-size: 13px;
     }
     .mcp-option-chk {
       accent-color: var(--vscode-focusBorder, #007acc); cursor: pointer;
     }
     .mcp-option-label {
       font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 11px; cursor: pointer; user-select: none;
+      font-size: 13px; cursor: pointer; user-select: none;
     }
     .mcp-option-hint {
-      font-size: 10px; color: var(--vscode-descriptionForeground); margin-left: 2px;
+      font-size: 12px; color: var(--vscode-descriptionForeground); margin-left: 2px;
     }
     /* ── MCP config toolbar ────────────────────────────── */
     .mcp-section-hdr {
@@ -2366,12 +2366,12 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     }
     /* ── MCP live toolset discovery (Option C) ─────────── */
     .mcp-src-note {
-      font-size: 10px; line-height: 1.5; margin: 4px 0 2px 0;
+      font-size: 12px; line-height: 1.5; margin: 4px 0 2px 0;
       color: var(--vscode-descriptionForeground);
     }
     .mcp-src-note.live { color: #4ec9b0; }
     .mcp-discover-status {
-      margin: 4px 0; padding: 4px 8px; font-size: 10px; border-radius: 4px;
+      margin: 4px 0; padding: 4px 8px; font-size: 12px; border-radius: 4px;
       border: 1px solid var(--vscode-panel-border, #333);
     }
     .mcp-discover-status.progress { color: var(--vscode-descriptionForeground); }
@@ -2798,7 +2798,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       html += '<div class="mcp-section-hdr" style="margin-top:16px">';
       html += '<div class="cat-header" style="margin-top:0;margin-bottom:0">Toolsets</div>';
       html += '<span style="display:flex;align-items:center;gap:8px">';
-      html += '<a href="https://developer.salesforce.com/docs/platform/lwc/guide/mcp-reference.html" style="font-size:10px;opacity:0.7;text-decoration:none" title="Salesforce MCP Reference">Tools Reference ↗</a>';
+      html += '<a href="https://developer.salesforce.com/docs/platform/lwc/guide/mcp-reference.html" style="font-size:12px;opacity:0.7;text-decoration:none" title="Salesforce MCP Reference">Tools Reference ↗</a>';
       html += '<button class="btn-icon" id="btnMcpDiscover" title="Query your installed @salesforce/mcp server for the live toolset list and GA/non-GA status">⟳ from server</button>';
       html += '</span>';
       html += '</div>';
@@ -2810,7 +2810,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
         html += '<div class="mcp-src-note">○ Built-in list — click <strong>⟳ from server</strong> to read the live toolsets &amp; GA/non-GA status from your installed @salesforce/mcp.</div>';
       }
       html += '<div class="mcp-discover-status" id="mcp-discover-status" style="display:none"></div>';
-      html += '<p class="create-intro" style="margin-bottom:4px">Check a <strong>toolset</strong> to enable all its tools, or check individual tools for <code style="font-size:10px;background:rgba(0,0,0,.2);padding:1px 4px;border-radius:2px">--tools</code>. Badges mark non-GA tools.</p>';
+      html += '<p class="create-intro" style="margin-bottom:4px">Check a <strong>toolset</strong> to enable all its tools, or check individual tools for <code style="font-size:12px;background:rgba(0,0,0,.2);padding:1px 4px;border-radius:2px">--tools</code>. Badges mark non-GA tools.</p>';
 
       for (const ts of toolsets) {
         const hasNonGa = ts.nonGaTools && ts.nonGaTools.length > 0;
@@ -2850,7 +2850,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       if (nonGaToolsets.length > 0) {
         html += '<div class="mcp-section-hdr" style="margin-top:20px">';
         html += '<div class="cat-header" style="margin-top:0;margin-bottom:0">Non-GA Tools (Pilot / Beta)</div>';
-        html += '<a href="https://developer.salesforce.com/docs/platform/lwc/guide/mcp-reference.html" style="font-size:10px;opacity:0.7;text-decoration:none" title="Salesforce MCP Reference">Tools Reference ↗</a>';
+        html += '<a href="https://developer.salesforce.com/docs/platform/lwc/guide/mcp-reference.html" style="font-size:12px;opacity:0.7;text-decoration:none" title="Salesforce MCP Reference">Tools Reference ↗</a>';
         html += '</div>';
         html += '<p class="create-intro" style="margin-bottom:4px">These tools are not yet generally available. Enable them by checking <strong>--allow-non-ga-tools</strong> above before installing. Subject to <a href="https://www.salesforce.com/company/legal/">Beta Services Terms</a>.</p>';
         for (const ts of nonGaToolsets) {
@@ -3243,7 +3243,7 @@ class SfSkillsPanel {
     body {
       margin: 0; padding: 0 24px 40px 24px;
       font-family: var(--vscode-font-family);
-      font-size: var(--vscode-font-size);
+      font-size: calc(var(--vscode-font-size) + 2px);
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
     }
@@ -3254,16 +3254,16 @@ class SfSkillsPanel {
       margin-bottom: 16px;
       display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
     }
-    .sf-title { margin: 0; font-size: 17px; font-weight: 700; }
+    .sf-title { margin: 0; font-size: 19px; font-weight: 700; }
     .sf-subtitle {
-      font-size: 12px; color: var(--vscode-descriptionForeground);
+      font-size: 14px; color: var(--vscode-descriptionForeground);
     }
     .sf-subtitle a { color: var(--vscode-textLink-foreground); text-decoration: none; cursor: pointer; }
     .sf-subtitle a:hover { text-decoration: underline; }
     /* toolbar */
     .sf-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
     .sf-search {
-      flex: 1; padding: 5px 10px; font-size: 12px;
+      flex: 1; padding: 5px 10px; font-size: 14px;
       background: var(--vscode-input-background);
       color: var(--vscode-input-foreground);
       border: 1px solid var(--vscode-input-border, #3c3c3c);
@@ -3272,42 +3272,55 @@ class SfSkillsPanel {
     .sf-search:focus { border-color: var(--vscode-focusBorder, #007acc); }
     .sf-btn-icon {
       background: none; border: none; color: var(--vscode-icon-foreground);
-      cursor: pointer; padding: 3px 6px; border-radius: 3px; font-size: 15px;
+      cursor: pointer; padding: 3px 6px; border-radius: 3px; font-size: 17px;
     }
     .sf-btn-icon:hover { background: var(--vscode-toolbar-hoverBackground); }
     /* stats */
-    .sf-stats { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 14px; }
+    .sf-stats { font-size: 13px; color: var(--vscode-descriptionForeground); margin-bottom: 14px; }
     .sf-stats strong { color: var(--vscode-foreground); }
     /* table */
-    .sf-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    #sfContent { overflow-x: auto; }
+    .sf-table { width: 100%; min-width: 640px; border-collapse: collapse; table-layout: fixed; }
     .sf-table thead th {
-      text-align: left; font-size: 11px; font-weight: 700;
+      position: relative;
+      text-align: left; font-size: 13px; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.06em;
       color: var(--vscode-descriptionForeground);
       padding: 6px 8px; border-bottom: 2px solid var(--vscode-panel-border, #333);
       overflow: hidden;
     }
+    .sf-col-resizer {
+      position: absolute; top: 0; right: 0; width: 6px; height: 100%;
+      cursor: col-resize; user-select: none; z-index: 2;
+      border-right: 2px solid var(--vscode-panel-border, #3c3c3c);
+    }
+    .sf-col-resizer:hover, .sf-col-resizer.active {
+      border-right-color: var(--vscode-focusBorder, #007acc);
+      background: rgba(0,122,204,.15);
+    }
+    body.sf-col-resizing { cursor: col-resize !important; }
+    body.sf-col-resizing * { user-select: none !important; }
     .sf-skill-row {
       border-bottom: 1px solid var(--vscode-panel-border, #2a2a2a);
       cursor: pointer;
     }
     .sf-skill-row:hover > td { background: var(--vscode-list-hoverBackground); }
     .sf-skill-row td { padding: 7px 8px; vertical-align: top; overflow: hidden; }
-    .sf-arrow { font-size: 9px; width: 16px; display: inline-block; transition: transform 0.15s; flex-shrink: 0; }
+    .sf-arrow { font-size: 11px; width: 16px; display: inline-block; transition: transform 0.15s; flex-shrink: 0; }
     .sf-arrow.open { transform: rotate(90deg); }
     .sf-skill-name {
-      display: block; font-weight: 600; font-size: 12px;
+      display: block; font-weight: 600; font-size: 14px;
       font-family: var(--vscode-editor-font-family, monospace);
       color: var(--vscode-textLink-foreground);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .sf-skill-desc {
-      font-size: 11px; color: var(--vscode-descriptionForeground);
+      font-size: 13px; color: var(--vscode-descriptionForeground);
       white-space: normal; word-break: break-word; line-height: 1.45;
     }
     .sf-badge {
       display: inline-flex; align-items: center;
-      font-size: 10px; font-weight: 600;
+      font-size: 12px; font-weight: 600;
       padding: 2px 7px; border-radius: 10px; margin-right: 3px;
     }
     .sf-badge-ref  { background: rgba(0,122,204,.15); color: #3794ff; }
@@ -3315,7 +3328,7 @@ class SfSkillsPanel {
     .sf-badge-ok   { background: rgba(78,201,176,.22); color: #4ec9b0; }
     .sf-actions { white-space: nowrap; text-align: right; }
     .sf-btn-install {
-      font-size: 11px; font-weight: 600;
+      font-size: 13px; font-weight: 600;
       padding: 3px 10px; border-radius: 3px; cursor: pointer;
       border: 1px solid transparent;
       background: var(--vscode-button-background, #0078d4);
@@ -3328,14 +3341,14 @@ class SfSkillsPanel {
     }
     .sf-btn-install:disabled { opacity: .65; cursor: not-allowed; }
     .sf-btn-gh {
-      font-size: 11px; padding: 3px 7px; border-radius: 3px; cursor: pointer;
+      font-size: 13px; padding: 3px 7px; border-radius: 3px; cursor: pointer;
       border: 1px solid var(--vscode-panel-border, #3c3c3c);
       background: transparent; color: var(--vscode-descriptionForeground);
       margin-left: 4px;
     }
     .sf-btn-gh:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
     .sf-btn-check {
-      font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 3px; cursor: pointer;
+      font-size: 13px; font-weight: 600; padding: 3px 8px; border-radius: 3px; cursor: pointer;
       border: 1px solid transparent; margin-left: 4px;
       background: var(--vscode-button-secondaryBackground, #3a3d41);
       color: var(--vscode-button-secondaryForeground, #ccc);
@@ -3347,7 +3360,7 @@ class SfSkillsPanel {
     .sf-btn-check.error { color: #f14c4c; border-color: rgba(241,76,76,.4); }
     /* validate-all button in toolbar */
     .sf-btn-validate {
-      font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 3px; cursor: pointer;
+      font-size: 14px; font-weight: 600; padding: 4px 10px; border-radius: 3px; cursor: pointer;
       border: 1px solid transparent;
       background: var(--vscode-button-background, #0078d4);
       color: var(--vscode-button-foreground, #fff);
@@ -3356,13 +3369,13 @@ class SfSkillsPanel {
     /* inline validation badge in detail row */
     .sf-val-badge {
       display: inline-flex; align-items: center; gap: 5px;
-      font-size: 11px; padding: 3px 8px; border-radius: 10px; font-weight: 600;
+      font-size: 13px; padding: 3px 8px; border-radius: 10px; font-weight: 600;
     }
     .sf-val-ok    { background: rgba(78,201,176,.18);  color: #4ec9b0; }
     .sf-val-warn  { background: rgba(240,192,64,.18);  color: #f0c040; }
     .sf-val-error { background: rgba(241,76,76,.15);   color: #f14c4c; }
     .sf-val-ns    { background: rgba(128,128,128,.18); color: var(--vscode-descriptionForeground); }
-    .sf-val-issues { margin-top: 6px; font-size: 11px; }
+    .sf-val-issues { margin-top: 6px; font-size: 13px; }
     .sf-val-issue-e { color: #f14c4c; padding-left: 14px; position: relative; }
     .sf-val-issue-e::before { content:'✗ '; position: absolute; left:0; }
     .sf-val-issue-w { color: #f0c040; padding-left: 14px; position: relative; }
@@ -3380,24 +3393,24 @@ class SfSkillsPanel {
     .sf-detail-sec { margin-bottom: 10px; }
     .sf-detail-sec:last-child { margin-bottom: 0; }
     .sf-detail-sec h4 {
-      margin: 0 0 5px 0; font-size: 10px; text-transform: uppercase;
+      margin: 0 0 5px 0; font-size: 12px; text-transform: uppercase;
       letter-spacing: .06em; font-weight: 700;
       color: var(--vscode-descriptionForeground);
     }
-    .sf-detail-desc { font-size: 12px; line-height: 1.6; }
+    .sf-detail-desc { font-size: 14px; line-height: 1.6; }
     .sf-file-list { list-style: none; margin: 0; padding: 0; }
     .sf-file-list li {
       display: flex; align-items: center; gap: 7px;
-      padding: 3px 0; font-size: 11px;
+      padding: 3px 0; font-size: 13px;
       font-family: var(--vscode-editor-font-family, monospace);
     }
     .sf-file-list a { color: var(--vscode-textLink-foreground); text-decoration: none; }
     .sf-file-list a:hover { text-decoration: underline; }
-    .sf-installed-note { margin-top: 6px; font-size: 11px; color: #4ec9b0; }
+    .sf-installed-note { margin-top: 6px; font-size: 13px; color: #4ec9b0; }
     /* loading / error */
     .sf-loading {
       text-align: center; padding: 60px 0;
-      color: var(--vscode-descriptionForeground); font-size: 13px;
+      color: var(--vscode-descriptionForeground); font-size: 15px;
     }
     .sf-error { text-align: center; padding: 40px; color: var(--vscode-errorForeground, #f14c4c); }
     .sf-spin { display: inline-block; animation: sfspin 1s linear infinite; }
@@ -3428,6 +3441,7 @@ class SfSkillsPanel {
     let detailCache = {};
     let installedSet = new Set();
     let checkCache = {};   // skillName -> { status, errors, warnings }
+    let colWidths = [20, 190, null, 120, 185];   // px per <th>, null = flexible
 
     document.getElementById('sfLinkGH').addEventListener('click', () =>
       vscode.postMessage({ type: 'openGitHub', url: 'https://github.com/forcedotcom/sf-skills' })
@@ -3502,12 +3516,13 @@ class SfSkillsPanel {
         return;
       }
 
+      const cw = i => colWidths[i] ? 'width:' + colWidths[i] + 'px;' : '';
       let html = '<table class="sf-table"><thead><tr>';
-      html += '<th style="width:20px"></th>';
-      html += '<th style="width:190px">Skill</th>';
-      html += '<th>Description</th>';
-      html += '<th style="width:120px">Resources</th>';
-      html += '<th style="width:185px;text-align:right">Actions</th>';
+      html += '<th style="' + cw(0) + '"></th>';
+      html += '<th style="' + cw(1) + '">Skill<span class="sf-col-resizer" data-col="1"></span></th>';
+      html += '<th style="' + cw(2) + '">Description<span class="sf-col-resizer" data-col="2"></span></th>';
+      html += '<th style="' + cw(3) + '">Resources<span class="sf-col-resizer" data-col="3"></span></th>';
+      html += '<th style="' + cw(4) + 'text-align:right">Actions<span class="sf-col-resizer" data-col="4"></span></th>';
       html += '</tr></thead><tbody>';
 
       for (const s of skills) {
@@ -3567,6 +3582,35 @@ class SfSkillsPanel {
         });
       });
       bindDetailLinks(cnt);
+      attachColResize(cnt);
+    }
+
+    function attachColResize(cnt) {
+      cnt.querySelectorAll('.sf-col-resizer').forEach(handle => {
+        handle.addEventListener('mousedown', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          const th = handle.parentElement;
+          const col = Number(handle.dataset.col);
+          const startX = e.pageX;
+          const startWidth = th.offsetWidth;
+          handle.classList.add('active');
+          document.body.classList.add('sf-col-resizing');
+          const onMove = ev => {
+            const newWidth = Math.max(40, startWidth + (ev.pageX - startX));
+            colWidths[col] = newWidth;
+            th.style.width = newWidth + 'px';
+          };
+          const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            handle.classList.remove('active');
+            document.body.classList.remove('sf-col-resizing');
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        });
+      });
     }
 
     function toggleRow(skillName) {
@@ -3611,7 +3655,7 @@ class SfSkillsPanel {
       if (d.isInstalled) {
         h += '<div class="sf-installed-note">✓ Installed in .github/skills/' + esc(d.skillName) + '/SKILL.md</div>';
       }
-      return h || '<div style="font-size:11px;color:var(--vscode-descriptionForeground)">No additional info.</div>';
+      return h || '<div style="font-size:13px;color:var(--vscode-descriptionForeground)">No additional info.</div>';
     }
 
     function updateDetailRow(d) {
@@ -3651,7 +3695,7 @@ class SfSkillsPanel {
     function showDetailError(skillName, msg) {
       const box = document.getElementById('sfdb-' + skillName);
       if (box) {
-        box.innerHTML = '<div style="font-size:11px;color:var(--vscode-errorForeground,#f14c4c)">Error: ' + esc(msg) + '</div>';
+        box.innerHTML = '<div style="font-size:13px;color:var(--vscode-errorForeground,#f14c4c)">Error: ' + esc(msg) + '</div>';
       }
     }
 
