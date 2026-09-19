@@ -3278,6 +3278,11 @@ class SfSkillsPanel {
     /* stats */
     .sf-stats { font-size: 13px; color: var(--vscode-descriptionForeground); margin-bottom: 14px; }
     .sf-stats strong { color: var(--vscode-foreground); }
+    .sf-stats-sel { color: var(--vscode-charts-blue, #3794ff); }
+    /* selection checkboxes */
+    .sf-check { cursor: pointer; vertical-align: middle; margin: 0; }
+    .sf-check:disabled { cursor: not-allowed; opacity: .5; }
+    .sf-table thead th.sf-th-check { padding-right: 0; }
     /* table */
     #sfContent { overflow-x: auto; }
     .sf-table { width: 100%; min-width: 640px; border-collapse: collapse; table-layout: fixed; }
@@ -3366,6 +3371,16 @@ class SfSkillsPanel {
       color: var(--vscode-button-foreground, #fff);
     }
     .sf-btn-validate:hover { background: var(--vscode-button-hoverBackground, #026ec1); }
+    /* install-selected button in toolbar */
+    .sf-btn-install-sel {
+      font-size: 14px; font-weight: 600; padding: 4px 10px; border-radius: 3px; cursor: pointer;
+      white-space: nowrap;
+      border: 1px solid var(--vscode-button-border, transparent);
+      background: var(--vscode-button-background, #0078d4);
+      color: var(--vscode-button-foreground, #fff);
+    }
+    .sf-btn-install-sel:hover:not(:disabled) { background: var(--vscode-button-hoverBackground, #026ec1); }
+    .sf-btn-install-sel:disabled { opacity: .5; cursor: not-allowed; }
     /* inline validation badge in detail row */
     .sf-val-badge {
       display: inline-flex; align-items: center; gap: 5px;
@@ -3426,6 +3441,7 @@ class SfSkillsPanel {
   <div class="sf-toolbar">
     <input class="sf-search" id="sfSearch" type="text" placeholder="Search skills by name or description…">
     <button class="sf-btn-icon" id="sfRefresh" title="Refresh list from GitHub">↻</button>
+    <button class="sf-btn-install-sel" id="sfInstallSelected" disabled title="Select skills with the checkboxes first">⬇ Install Selected</button>
     <button class="sf-btn-validate" id="sfValidateAll" title="Validate all installed skills in one report">✓ Validate Installed</button>
   </div>
 
@@ -3441,7 +3457,11 @@ class SfSkillsPanel {
     let detailCache = {};
     let installedSet = new Set();
     let checkCache = {};   // skillName -> { status, errors, warnings }
-    let colWidths = [20, 190, null, 120, 185];   // px per <th>, null = flexible
+    let selectedSet = new Set();   // skill names ticked for bulk install (survives filtering/re-render)
+    let shownSkills = [];          // skills currently rendered (after search filter)
+    let bulkQueue = [];            // remaining skill names in a running "Install Selected" batch
+    let bulkTotal = 0;
+    let colWidths = [22, 20, 190, null, 120, 185];   // px per <th>, null = flexible
 
     document.getElementById('sfLinkGH').addEventListener('click', () =>
       vscode.postMessage({ type: 'openGitHub', url: 'https://github.com/forcedotcom/sf-skills' })
@@ -3459,6 +3479,7 @@ class SfSkillsPanel {
     document.getElementById('sfSearch').addEventListener('input', e => {
       renderTable(filterSkills(e.target.value));
     });
+    document.getElementById('sfInstallSelected').addEventListener('click', () => installSelected());
 
     window.addEventListener('message', ({ data }) => {
       switch (data.type) {
@@ -3504,25 +3525,25 @@ class SfSkillsPanel {
     }
 
     function renderTable(skills) {
-      const total = allSkills.length;
-      const shown = skills.length;
-      document.getElementById('sfStats').innerHTML =
-        '<strong>' + shown + '</strong> skill' + (shown !== 1 ? 's' : '') +
-        (shown < total ? ' (filtered from ' + total + ')' : '');
+      shownSkills = skills;
+      updateStats();
 
       if (!skills.length) {
         document.getElementById('sfContent').innerHTML =
           '<div class="sf-error" style="color:var(--vscode-descriptionForeground)">No skills match your search.</div>';
+        updateSelectionUi();
         return;
       }
 
       const cw = i => colWidths[i] ? 'width:' + colWidths[i] + 'px;' : '';
       let html = '<table class="sf-table"><thead><tr>';
-      html += '<th style="' + cw(0) + '"></th>';
-      html += '<th style="' + cw(1) + '">Skill<span class="sf-col-resizer" data-col="1"></span></th>';
-      html += '<th style="' + cw(2) + '">Description<span class="sf-col-resizer" data-col="2"></span></th>';
-      html += '<th style="' + cw(3) + '">Resources<span class="sf-col-resizer" data-col="3"></span></th>';
-      html += '<th style="' + cw(4) + 'text-align:right">Actions<span class="sf-col-resizer" data-col="4"></span></th>';
+      html += '<th class="sf-th-check" style="' + cw(0) + '">' +
+              '<input type="checkbox" class="sf-check" id="sfCheckAll" title="Select / unselect all listed skills"></th>';
+      html += '<th style="' + cw(1) + '"></th>';
+      html += '<th style="' + cw(2) + '">Skill<span class="sf-col-resizer" data-col="2"></span></th>';
+      html += '<th style="' + cw(3) + '">Description<span class="sf-col-resizer" data-col="3"></span></th>';
+      html += '<th style="' + cw(4) + '">Resources<span class="sf-col-resizer" data-col="4"></span></th>';
+      html += '<th style="' + cw(5) + 'text-align:right">Actions<span class="sf-col-resizer" data-col="5"></span></th>';
       html += '</tr></thead><tbody>';
 
       for (const s of skills) {
@@ -3533,6 +3554,8 @@ class SfSkillsPanel {
         const hasAss = d ? d.hasAssets    : false;
 
         html += '<tr class="sf-skill-row" data-skill="' + esc(s.name) + '">';
+        html += '<td><input type="checkbox" class="sf-check sf-check-row" data-skill="' + esc(s.name) + '"' +
+                (selectedSet.has(s.name) ? ' checked' : '') + '></td>';
         html += '<td><span class="sf-arrow">▶</span></td>';
         html += '<td><span class="sf-skill-name">' + esc(s.name) + '</span></td>';
         html += '<td><span class="sf-skill-desc">' + esc(desc || '—') + '</span></td>';
@@ -3552,7 +3575,7 @@ class SfSkillsPanel {
 
         // Detail row
         html += '<tr class="sf-detail-row" id="sfdr-' + esc(s.name) + '">';
-        html += '<td colspan="5"><div class="sf-detail-box" id="sfdb-' + esc(s.name) + '">';
+        html += '<td colspan="6"><div class="sf-detail-box" id="sfdb-' + esc(s.name) + '">';
         if (d) { html += buildDetailHtml(d); }
         else   { html += '<div class="sf-loading" style="padding:8px 0"><span class="sf-spin">↻</span>&nbsp;Loading…</div>'; }
         if (checkCache[s.name]) { html += buildCheckHtml(s.name, checkCache[s.name]); }
@@ -3565,10 +3588,32 @@ class SfSkillsPanel {
 
       cnt.querySelectorAll('.sf-skill-row').forEach(row => {
         row.addEventListener('click', e => {
-          if (e.target.closest('.sf-btn-install') || e.target.closest('.sf-btn-gh') || e.target.closest('.sf-btn-check')) { return; }
+          if (e.target.closest('.sf-btn-install') || e.target.closest('.sf-btn-gh') || e.target.closest('.sf-btn-check') || e.target.closest('.sf-check')) { return; }
           toggleRow(row.dataset.skill);
         });
       });
+      cnt.querySelectorAll('.sf-check-row').forEach(cb => {
+        cb.addEventListener('click', e => e.stopPropagation());
+        cb.addEventListener('change', () => {
+          if (cb.checked) { selectedSet.add(cb.dataset.skill); }
+          else            { selectedSet.delete(cb.dataset.skill); }
+          updateSelectionUi();
+        });
+      });
+      const allCb = cnt.querySelector('#sfCheckAll');
+      if (allCb) {
+        allCb.addEventListener('click', e => e.stopPropagation());
+        allCb.addEventListener('change', () => {
+          // Only the currently listed (filtered) skills are affected; selections
+          // made outside the active filter are left untouched.
+          for (const s of shownSkills) {
+            if (allCb.checked) { selectedSet.add(s.name); }
+            else               { selectedSet.delete(s.name); }
+          }
+          cnt.querySelectorAll('.sf-check-row').forEach(rb => { rb.checked = allCb.checked; });
+          updateSelectionUi();
+        });
+      }
       cnt.querySelectorAll('.sf-btn-install').forEach(btn => {
         btn.addEventListener('click', e => { e.stopPropagation(); installSkill(btn.dataset.skill, btn); });
       });
@@ -3583,6 +3628,68 @@ class SfSkillsPanel {
       });
       bindDetailLinks(cnt);
       attachColResize(cnt);
+      updateSelectionUi();
+    }
+
+    function updateStats() {
+      const total = allSkills.length;
+      const shown = shownSkills.length;
+      const sel   = selectedSet.size;
+      let h = '<strong>' + shown + '</strong> skill' + (shown !== 1 ? 's' : '') +
+              (shown < total ? ' (filtered from ' + total + ')' : '');
+      h += ' · <strong class="sf-stats-sel">' + sel + '</strong> selected';
+      document.getElementById('sfStats').innerHTML = h;
+    }
+
+    // Keeps the header checkbox, the "N selected" counter and the Install Selected
+    // button in sync with selectedSet. The header checkbox reflects only the rows
+    // currently listed, so it stays meaningful while a search filter is active.
+    function updateSelectionUi() {
+      updateStats();
+
+      const allCb = document.getElementById('sfCheckAll');
+      if (allCb) {
+        const shownSel = shownSkills.filter(s => selectedSet.has(s.name)).length;
+        allCb.checked = shownSel > 0 && shownSel === shownSkills.length;
+        allCb.indeterminate = shownSel > 0 && shownSel < shownSkills.length;
+      }
+
+      const btn = document.getElementById('sfInstallSelected');
+      if (btn && !bulkQueue.length) {
+        const n = selectedSet.size;
+        btn.disabled = n === 0;
+        btn.textContent = n ? '⬇ Install Selected (' + n + ')' : '⬇ Install Selected';
+        btn.title = n ? 'Install the ' + n + ' selected skill' + (n !== 1 ? 's' : '')
+                      : 'Select skills with the checkboxes first';
+      }
+    }
+
+    function installSelected() {
+      if (bulkQueue.length) { return; }          // a batch is already running
+      const names = [...selectedSet];
+      if (!names.length) { return; }
+      bulkQueue = names;
+      bulkTotal = names.length;
+      const btn = document.getElementById('sfInstallSelected');
+      btn.disabled = true;
+      // Install one at a time: the host handles a single skill per message, and
+      // handleInstallResult() drives the queue forward as each one comes back.
+      installNextInBatch();
+    }
+
+    function installNextInBatch() {
+      const btn = document.getElementById('sfInstallSelected');
+      if (!bulkQueue.length) {
+        bulkTotal = 0;
+        updateSelectionUi();
+        return;
+      }
+      const done = bulkTotal - bulkQueue.length + 1;
+      btn.textContent = '⬇ Installing ' + done + '/' + bulkTotal + '…';
+      const name = bulkQueue[0];
+      const rowBtn = document.querySelector('.sf-btn-install[data-skill="' + name + '"]');
+      if (rowBtn) { rowBtn.disabled = true; rowBtn.textContent = 'Installing…'; }
+      vscode.postMessage({ type: 'installSkill', skillName: name });
     }
 
     function attachColResize(cnt) {
@@ -3666,7 +3773,7 @@ class SfSkillsPanel {
       if (main) {
         const descEl = main.querySelector('.sf-skill-desc');
         if (descEl && d.description) { descEl.textContent = d.description; }
-        const badgeCell = main.querySelectorAll('td')[3];
+        const badgeCell = main.querySelectorAll('td')[4];
         if (d.hasReferences && !badgeCell.querySelector('.sf-badge-ref')) {
           badgeCell.insertAdjacentHTML('afterbegin', '<span class="sf-badge sf-badge-ref">📎 refs</span>');
         }
@@ -3705,6 +3812,10 @@ class SfSkillsPanel {
     }
 
     function handleInstallResult(data) {
+      if (bulkQueue.length && bulkQueue[0] === data.skillName) {
+        bulkQueue.shift();
+        setTimeout(installNextInBatch, 0);
+      }
       const btn = document.querySelector('.sf-btn-install[data-skill="' + data.skillName + '"]');
       if (btn) {
         btn.disabled = false;
@@ -3721,7 +3832,7 @@ class SfSkillsPanel {
           }
           const main = document.querySelector('.sf-skill-row[data-skill="' + data.skillName + '"]');
           if (main) {
-            const bc = main.querySelectorAll('td')[3];
+            const bc = main.querySelectorAll('td')[4];
             if (!bc.querySelector('.sf-badge-ok')) {
               bc.insertAdjacentHTML('beforeend', '<span class="sf-badge sf-badge-ok">✓ installed</span>');
             }

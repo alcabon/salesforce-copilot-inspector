@@ -2,7 +2,7 @@
   "name": "salesforce-copilot-inspector",
   "displayName": "Salesforce Copilot Inspector",
   "description": "Inspect GitHub Copilot configurations, installed skills, hooks, instructions, and Salesforce MCP server setup",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "alaincabon",
   "license": "MIT",
   "keywords": [
