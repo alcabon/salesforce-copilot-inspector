@@ -213,6 +213,29 @@ Installed skills are marked with a `✓ installed` badge and the Install button 
 
 ---
 
+### Skill Usage Monitor
+
+A full editor panel (📈 **Usage** button in the sidebar, the pulse icon in the view title, or **Open Skill Usage Monitor** in the command palette) that shows how often each skill is actually used by GitHub Copilot and Claude Code.
+
+- **Activity chart** of skill loads per day / week, split by agent.
+- **Skills table**: uses in the period (Copilot / Claude Code), the Claude Code all-time counter, last use, workspaces where it was used, and where it is installed (workspace, personal, plugin, built-in). Click a skill to open its `SKILL.md`.
+- **Unused skills**: installed skills with no use in the selected period are flagged — cleanup candidates, like the "Find unused skills" section of Claude Code's `/skill-doctor`.
+- **Claude Code plugins** with their usage and a *not used recently* flag, as in `/plugin`.
+- Filters for period (7 days → all time), agent, and current workspace.
+- Buttons that run Claude Code's `/skill-doctor`, `/doctor`, `/plugin` and `/usage` in a terminal.
+
+Everything is read locally, nothing is sent anywhere:
+
+| Source | What it gives |
+|---|---|
+| `<VS Code user dir>/workspaceStorage/*/chatSessions/*` | Each skill Copilot Chat read (`Reading skill [name]`) or the user invoked as `/name`, with timestamp and workspace |
+| `~/.claude/projects/**/*.jsonl` | Each Claude Code `Skill` tool call or `/skill` command, with timestamp and working directory (pruned after `cleanupPeriodDays`, 30 by default) |
+| `~/.claude.json` → `skillUsage`, `pluginUsage` | Claude Code's all-time counters (the data behind `/skill-doctor` and `/plugin`) |
+
+`CLAUDE_CONFIG_DIR` is honoured when set.
+
+---
+
 ## Getting Started
 
 1. Open a workspace in VS Code.

@@ -54,10 +54,21 @@
         "command": "salesforce-copilot-inspector.refresh",
         "title": "Refresh Checks",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "salesforce-copilot-inspector.openSkillUsage",
+        "title": "Open Skill Usage Monitor",
+        "category": "Salesforce Copilot Inspector",
+        "icon": "$(pulse)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "salesforce-copilot-inspector.openSkillUsage",
+          "when": "view == copilotChecksView",
+          "group": "navigation"
+        },
         {
           "command": "salesforce-copilot-inspector.refresh",
           "when": "view == copilotChecksView",

@@ -1502,6 +1502,9 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 				case 'openSummary':
 					SummaryPanel.createOrShow(this._lastChecks, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
 					break;
+				case 'openSkillUsage':
+					SkillUsagePanel.createOrShow(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
+					break;
 				case 'showMcpFile': {
 					const filePath = data.path as string;
 					if (filePath) {
@@ -2184,9 +2187,10 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     /* ── summary toolbar ──────────────────────────────────── */
     .summary-bar {
       padding: 6px 8px 0 8px;
+      display: flex; gap: 6px;
     }
     .btn-summary {
-      width: 100%; padding: 5px 10px;
+      flex: 1; min-width: 0; padding: 5px 10px;
       font-size: 14px; font-weight: 600;
       background: var(--vscode-button-background, #0e639c);
       color: var(--vscode-button-foreground, #fff);
@@ -2387,6 +2391,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 
   <div class="summary-bar">
     <button class="btn-summary" id="btnSummary" title="Open a full summary of all installed Copilot files"><span>📋</span><span>Summary</span></button>
+    <button class="btn-summary" id="btnSkillUsage" title="Monitor how often Copilot and Claude Code use each skill"><span>📈</span><span>Usage</span></button>
   </div>
 
   <div class="tab-bar">
@@ -2433,6 +2438,9 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     // ── summary button ────────────────────────────────────
     document.getElementById('btnSummary').addEventListener('click', () =>
       vscode.postMessage({ type: 'openSummary' })
+    );
+    document.getElementById('btnSkillUsage').addEventListener('click', () =>
+      vscode.postMessage({ type: 'openSkillUsage' })
     );
 
     // ── tab switching ─────────────────────────────────────
@@ -4810,11 +4818,946 @@ class SummaryPanel {
 }
 
 // ---------------------------------------------------------------------------
+// Skill usage monitor
+//
+// Usage is read from the traces both agents already keep on this machine:
+//   • GitHub Copilot Chat — every skill load is logged in the chat session as
+//     "Reading skill [name](file:///…/SKILL.md?vscodeLinkType%3Dskill)" under
+//     <VS Code user dir>/workspaceStorage/<id>/chatSessions/*.json(l).
+//   • Claude Code — ~/.claude.json keeps all-time skillUsage / pluginUsage
+//     counters (the data behind /skill-doctor "unused skills" and /plugin
+//     "Not used recently"); ~/.claude/projects/**/*.jsonl transcripts record
+//     each Skill tool call (or /skill slash command) with timestamp and cwd.
+// ---------------------------------------------------------------------------
+
+export interface SkillUsageEvent {
+	skill: string;
+	source: 'copilot' | 'claude';
+	timestamp: number;
+	workspace?: string;
+	skillPath?: string;
+}
+
+export interface InstalledSkill {
+	name: string;
+	dir: string;
+	file: string;
+	scope: 'workspace' | 'personal' | 'plugin' | 'builtin';
+	location: string;
+}
+
+interface UsageCounter { usageCount: number; lastUsedAt?: number; }
+
+interface SkillUsageSource { label: string; path: string; found: boolean; files: number; events: number; }
+
+interface SkillUsageSnapshot {
+	generatedAt: number;
+	currentWorkspace?: string;
+	events: SkillUsageEvent[];
+	installed: InstalledSkill[];
+	claudeSkillCounters: Record<string, UsageCounter>;
+	claudePlugins: ({ name: string } & UsageCounter)[];
+	sources: SkillUsageSource[];
+}
+
+// Copilot leaves two traces: the agent reading a skill ("Reading skill [name](…?vscodeLinkType%3Dskill)")
+// and the user invoking one as /name, which attaches its SKILL.md as a prompt-file variable.
+const COPILOT_SKILL_MARKER = 'vscodeLinkType%3Dskill';
+const COPILOT_PROMPT_MARKER = 'vscode.prompt.file__';
+const COPILOT_SKILL_LINK_RE = /\[([^[\]\\"]+)\]\((file:\/\/\/[^)"\s?#]+?\/SKILL\.md)\?vscodeLinkType%3Dskill/g;
+const COPILOT_SKILL_PROMPT_RE = /"id":"vscode\.prompt\.file__(file:\/\/\/[^"]+?\/SKILL\.md)"/g;
+const CLAUDE_SKILL_TOOL_MARKER = '"name":"Skill"';
+const CLAUDE_SLASH_MARKER = '<command-name>';
+
+function hasCopilotSkillTrace(text: string): boolean {
+	return text.includes(COPILOT_SKILL_MARKER) || (text.includes(COPILOT_PROMPT_MARKER) && text.includes('SKILL.md'));
+}
+
+/** Returns the distinct skills a Copilot chat fragment reports as read or invoked (name + SKILL.md file URI). */
+export function extractCopilotSkillReads(text: string): { name: string; uri: string }[] {
+	const out: { name: string; uri: string }[] = [];
+	const seen = new Set<string>();
+	const add = (name: string, uri: string): void => {
+		if (seen.has(uri)) { return; }
+		seen.add(uri);
+		out.push({ name, uri });
+	};
+	for (const m of text.matchAll(COPILOT_SKILL_LINK_RE)) { add(m[1], m[2]); }
+	for (const m of text.matchAll(COPILOT_SKILL_PROMPT_RE)) {
+		const parts = m[1].split('/');
+		let name = parts[parts.length - 2];
+		try { name = decodeURIComponent(name); } catch { /* keep encoded */ }
+		add(name, m[1]);
+	}
+	return out;
+}
+
+/**
+ * Extracts skill loads from one Copilot chat session file. Handles the legacy
+ * whole-object .json format and the .jsonl mutation log (kind 0 = initial,
+ * 1 = set, 2 = push at key path `k`). A skill read in chunks within the same
+ * request counts once; its timestamp is the request's timestamp.
+ */
+export function parseCopilotChatSession(raw: string, isJsonl: boolean): { name: string; uri: string; timestamp?: number }[] {
+	if (!hasCopilotSkillTrace(raw)) { return []; }
+	const reads = new Map<string, { name: string; uri: string; index: number }>();
+	const requestTs: (number | undefined)[] = [];
+
+	const scan = (index: number, value: unknown): void => {
+		const text = typeof value === 'string' ? value : JSON.stringify(value);
+		if (!text || !hasCopilotSkillTrace(text)) { return; }
+		for (const r of extractCopilotSkillReads(text)) {
+			const key = index + '|' + r.uri;
+			if (!reads.has(key)) { reads.set(key, { ...r, index }); }
+		}
+	};
+	const putRequests = (requests: unknown, start: number): void => {
+		if (!Array.isArray(requests)) { return; }
+		requests.forEach((req, n) => {
+			const ts = (req as { timestamp?: unknown } | null)?.timestamp;
+			requestTs[start + n] = typeof ts === 'number' ? ts : undefined;
+			scan(start + n, req);
+		});
+	};
+
+	if (!isJsonl) {
+		try { putRequests((JSON.parse(raw) as { requests?: unknown }).requests, 0); } catch { /* malformed */ }
+	} else {
+		for (const line of raw.split('\n')) {
+			if (!line.trim()) { continue; }
+			let op: { kind?: number; k?: unknown[]; v?: unknown; i?: number };
+			try { op = JSON.parse(line); } catch { continue; }
+			const k = Array.isArray(op.k) ? op.k : [];
+			const onRequests = k[0] === 'requests';
+			const reqIndex = typeof k[1] === 'number' ? k[1] : undefined;
+			if (op.kind === 0) {
+				requestTs.length = 0;
+				putRequests((op.v as { requests?: unknown } | null)?.requests, 0);
+			} else if (op.kind === 1 && onRequests) {
+				if (k.length === 1) { requestTs.length = 0; putRequests(op.v, 0); }
+				else if (reqIndex !== undefined && k.length === 2) { putRequests([op.v], reqIndex); }
+				else if (reqIndex !== undefined) { scan(reqIndex, op.v); }
+			} else if (op.kind === 2 && onRequests) {
+				if (k.length === 1) {
+					const start = typeof op.i === 'number' && op.i <= requestTs.length ? op.i : requestTs.length;
+					requestTs.length = start;
+					putRequests(op.v, start);
+				} else if (reqIndex !== undefined) {
+					scan(reqIndex, op.v);
+				}
+			}
+		}
+	}
+	return Array.from(reads.values()).map(r => ({ name: r.name, uri: r.uri, timestamp: requestTs[r.index] }));
+}
+
+/**
+ * Extracts skill invocations from one Claude Code transcript line: assistant
+ * `Skill` tool calls, and user-typed `/name` slash commands (which may also be
+ * built-in commands — the caller keeps only names that match a known skill).
+ */
+export function parseClaudeTranscriptLine(line: string): { skill: string; timestamp: number; cwd?: string; id?: string; slash: boolean }[] {
+	if (!line.includes(CLAUDE_SKILL_TOOL_MARKER) && !line.includes(CLAUDE_SLASH_MARKER)) { return []; }
+	let entry: { type?: string; timestamp?: string; cwd?: string; message?: { content?: unknown } };
+	try { entry = JSON.parse(line); } catch { return []; }
+	const timestamp = Date.parse(entry?.timestamp ?? '');
+	if (!entry || Number.isNaN(timestamp)) { return []; }
+	const content = entry.message?.content;
+	const hits: { skill: string; timestamp: number; cwd?: string; id?: string; slash: boolean }[] = [];
+	if (entry.type === 'assistant' && Array.isArray(content)) {
+		for (const block of content as { type?: string; name?: string; id?: string; input?: { skill?: unknown } }[]) {
+			if (block?.type === 'tool_use' && block.name === 'Skill' && typeof block.input?.skill === 'string') {
+				hits.push({ skill: block.input.skill.replace(/^\//, ''), timestamp, cwd: entry.cwd, id: block.id, slash: false });
+			}
+		}
+	} else if (entry.type === 'user') {
+		const text = typeof content === 'string'
+			? content
+			: Array.isArray(content)
+				? (content as { type?: string; text?: string }[]).filter(b => b?.type === 'text').map(b => b.text ?? '').join('\n')
+				: '';
+		const m = /<command-name>\/?([^<\s]+)<\/command-name>/.exec(text);
+		if (m) { hits.push({ skill: m[1], timestamp, cwd: entry.cwd, slash: true }); }
+	}
+	return hits;
+}
+
+function claudeConfigDir(): string {
+	return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+}
+
+function readClaudeUsageCounters(): { file: string; found: boolean; skills: Record<string, UsageCounter>; plugins: Record<string, UsageCounter> } {
+	const file = process.env.CLAUDE_CONFIG_DIR
+		? path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json')
+		: path.join(os.homedir(), '.claude.json');
+	try {
+		const cfg = JSON.parse(fs.readFileSync(file, 'utf8')) as { skillUsage?: Record<string, UsageCounter>; pluginUsage?: Record<string, UsageCounter> };
+		return { file, found: true, skills: cfg.skillUsage ?? {}, plugins: cfg.pluginUsage ?? {} };
+	} catch {
+		return { file, found: false, skills: {}, plugins: {} };
+	}
+}
+
+function listSkillDirs(root: string): string[] {
+	try {
+		return fs.readdirSync(root, { withFileTypes: true })
+			.filter(d => d.isDirectory() && fileExists(path.join(root, d.name, 'SKILL.md')))
+			.map(d => d.name);
+	} catch {
+		return [];
+	}
+}
+
+/** Skills installed for the current workspace, the user profile, and Claude Code plugins. */
+function discoverInstalledSkills(workspaceRoot?: string): InstalledSkill[] {
+	const out: InstalledSkill[] = [];
+	const add = (root: string, scope: InstalledSkill['scope'], location: string, prefix = ''): void => {
+		for (const name of listSkillDirs(root)) {
+			const dir = path.join(root, name);
+			out.push({ name: prefix + name, dir, file: path.join(dir, 'SKILL.md'), scope, location });
+		}
+	};
+	if (workspaceRoot) {
+		for (const rel of ['.github/skills', '.claude/skills', '.agents/skills']) {
+			add(path.join(workspaceRoot, rel), 'workspace', rel);
+		}
+	}
+	for (const rel of ['.copilot/skills', '.claude/skills', '.agents/skills']) {
+		add(path.join(os.homedir(), rel), 'personal', '~/' + rel);
+	}
+	// Claude Code plugins: installed_plugins.json maps "plugin@marketplace" to
+	// one install (v1) or a list of installs (v2), each with an installPath.
+	try {
+		const manifest = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(), 'plugins', 'installed_plugins.json'), 'utf8')) as { plugins?: Record<string, unknown> };
+		for (const [key, value] of Object.entries(manifest.plugins ?? {})) {
+			const installs = (Array.isArray(value) ? value : [value]) as { installPath?: string }[];
+			const plugin = key.split('@')[0];
+			const seen = new Set<string>();
+			for (const inst of installs) {
+				if (!inst?.installPath || seen.has(inst.installPath)) { continue; }
+				seen.add(inst.installPath);
+				add(path.join(inst.installPath, 'skills'), 'plugin', 'plugin ' + key, plugin + ':');
+			}
+		}
+	} catch { /* no plugins */ }
+	return out;
+}
+
+async function listFilesSafe(dir: string, filter: (name: string) => boolean): Promise<string[]> {
+	try {
+		const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+		return entries.filter(e => e.isFile() && filter(e.name)).map(e => path.join(dir, e.name));
+	} catch {
+		return [];
+	}
+}
+
+async function listDirsSafe(dir: string): Promise<string[]> {
+	try {
+		const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+		return entries.filter(e => e.isDirectory()).map(e => path.join(dir, e.name));
+	} catch {
+		return [];
+	}
+}
+
+// Parse results per log file, keyed by path; reused while mtime + size are unchanged.
+const skillUsageFileCache = new Map<string, { mtimeMs: number; size: number; value: unknown[] }>();
+
+async function scanFileCached<T>(file: string, parse: (raw: string, mtimeMs: number) => T[]): Promise<T[]> {
+	try {
+		const st = await fs.promises.stat(file);
+		const hit = skillUsageFileCache.get(file);
+		if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) { return hit.value as T[]; }
+		const value = parse(await fs.promises.readFile(file, 'utf8'), st.mtimeMs);
+		skillUsageFileCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
+		return value;
+	} catch {
+		return [];
+	}
+}
+
+function fileUriToPath(uri: string): string {
+	try { return vscode.Uri.parse(uri).fsPath; } catch { return uri; }
+}
+
+async function collectCopilotSkillUsage(userDir: string | undefined, onProgress: (msg: string) => void): Promise<{ events: SkillUsageEvent[]; source: SkillUsageSource }> {
+	const source: SkillUsageSource = { label: 'GitHub Copilot Chat sessions', path: userDir ? path.join(userDir, 'workspaceStorage') : '(unknown)', found: false, files: 0, events: 0 };
+	if (!userDir) { return { events: [], source }; }
+
+	const jobs: { file: string; workspace?: string }[] = [];
+	const isSession = (n: string): boolean => n.endsWith('.json') || n.endsWith('.jsonl');
+	for (const wsDir of await listDirsSafe(path.join(userDir, 'workspaceStorage'))) {
+		const files = await listFilesSafe(path.join(wsDir, 'chatSessions'), isSession);
+		if (!files.length) { continue; }
+		let workspace: string | undefined;
+		try {
+			const meta = JSON.parse(await fs.promises.readFile(path.join(wsDir, 'workspace.json'), 'utf8')) as { folder?: string; workspace?: string };
+			const uri = meta.folder ?? meta.workspace;
+			if (uri) { workspace = fileUriToPath(uri); }
+		} catch { /* no workspace.json */ }
+		for (const file of files) { jobs.push({ file, workspace }); }
+	}
+	for (const file of await listFilesSafe(path.join(userDir, 'globalStorage', 'emptyWindowChatSessions'), isSession)) {
+		jobs.push({ file });
+	}
+	source.found = jobs.length > 0;
+	source.files = jobs.length;
+
+	let done = 0;
+	const results = await mapWithConcurrency(jobs, 8, async ({ file, workspace }) => {
+		const events = await scanFileCached<SkillUsageEvent>(file, (raw, mtimeMs) =>
+			parseCopilotChatSession(raw, file.endsWith('.jsonl')).map(r => ({
+				skill: r.name,
+				source: 'copilot',
+				timestamp: r.timestamp ?? mtimeMs,
+				workspace,
+				skillPath: fileUriToPath(r.uri),
+			})));
+		if (++done % 25 === 0) { onProgress(`Scanning Copilot chat sessions… ${done}/${jobs.length}`); }
+		return events;
+	});
+	const events = results.flat();
+	source.events = events.length;
+	return { events, source };
+}
+
+async function collectClaudeSkillUsage(onProgress: (msg: string) => void): Promise<{ events: SkillUsageEvent[]; slash: SkillUsageEvent[]; source: SkillUsageSource }> {
+	const root = path.join(claudeConfigDir(), 'projects');
+	const source: SkillUsageSource = { label: 'Claude Code transcripts', path: root, found: false, files: 0, events: 0 };
+
+	// <project>/<session>.jsonl, plus <project>/<session>/subagents/*.jsonl
+	const files: string[] = [];
+	const walk = async (dir: string, depth: number): Promise<void> => {
+		files.push(...await listFilesSafe(dir, n => n.endsWith('.jsonl')));
+		if (depth > 0) {
+			for (const sub of await listDirsSafe(dir)) { await walk(sub, depth - 1); }
+		}
+	};
+	await walk(root, 3);
+	source.found = files.length > 0;
+	source.files = files.length;
+	onProgress(`Scanning Claude Code transcripts… (${files.length} files)`);
+
+	const results = await mapWithConcurrency(files, 8, file => scanFileCached(file, raw =>
+		raw.includes(CLAUDE_SKILL_TOOL_MARKER) || raw.includes(CLAUDE_SLASH_MARKER)
+			? raw.split('\n').flatMap(parseClaudeTranscriptLine)
+			: []));
+
+	// A tool_use id seen twice (e.g. a resumed session copies history) counts once.
+	const seenToolIds = new Set<string>();
+	const events: SkillUsageEvent[] = [];
+	const slash: SkillUsageEvent[] = [];
+	for (const hit of results.flat()) {
+		const event: SkillUsageEvent = { skill: hit.skill, source: 'claude', timestamp: hit.timestamp, workspace: hit.cwd };
+		if (hit.slash) {
+			slash.push(event);
+		} else if (!hit.id || !seenToolIds.has(hit.id)) {
+			if (hit.id) { seenToolIds.add(hit.id); }
+			events.push(event);
+		}
+	}
+	return { events, slash, source };
+}
+
+export async function collectSkillUsage(workspaceRoot: string | undefined, userDir: string | undefined, onProgress: (msg: string) => void): Promise<SkillUsageSnapshot> {
+	onProgress('Reading installed skills and Claude Code counters…');
+	const installed = discoverInstalledSkills(workspaceRoot);
+	const counters = readClaudeUsageCounters();
+
+	const copilot = await collectCopilotSkillUsage(userDir, onProgress);
+	const claude = await collectClaudeSkillUsage(onProgress);
+
+	// Slash commands are only skill uses when the name is a known skill.
+	const known = new Set<string>([
+		...installed.map(s => s.name),
+		...Object.keys(counters.skills),
+		...claude.events.map(e => e.skill),
+	]);
+	const claudeEvents = [...claude.events, ...claude.slash.filter(e => known.has(e.skill))];
+	claude.source.events = claudeEvents.length;
+
+	// Copilot built-in skills (shipped inside the Copilot Chat extension) only
+	// show up once used; list them so their rows can be labelled.
+	const installedDirs = new Set(installed.map(s => path.normalize(s.dir).toLowerCase()));
+	for (const e of copilot.events) {
+		if (!e.skillPath) { continue; }
+		const dir = path.dirname(e.skillPath);
+		const norm = path.normalize(dir).toLowerCase();
+		if (installedDirs.has(norm) || !/[\\/]extensions[\\/]/i.test(dir)) { continue; }
+		installedDirs.add(norm);
+		installed.push({ name: e.skill, dir, file: e.skillPath, scope: 'builtin', location: 'Copilot Chat built-in' });
+	}
+
+	return {
+		generatedAt: Date.now(),
+		currentWorkspace: workspaceRoot,
+		events: [...copilot.events, ...claudeEvents].sort((a, b) => a.timestamp - b.timestamp),
+		installed,
+		claudeSkillCounters: counters.skills,
+		claudePlugins: Object.entries(counters.plugins).map(([name, c]) => ({ name, usageCount: c.usageCount ?? 0, lastUsedAt: c.lastUsedAt })),
+		sources: [
+			copilot.source,
+			claude.source,
+			{ label: 'Claude Code usage counters (skillUsage / pluginUsage)', path: counters.file, found: counters.found, files: counters.found ? 1 : 0, events: Object.keys(counters.skills).length },
+		],
+	};
+}
+
+// Claude Code commands the monitor can launch in a terminal.
+const CLAUDE_USAGE_COMMANDS = ['/skill-doctor', '/doctor', '/plugin', '/usage'];
+
+class SkillUsagePanel {
+	public static currentPanel: SkillUsagePanel | undefined;
+	/** VS Code user data dir (…/Code/User), derived from the extension's global storage on activation. */
+	public static userDataDir: string | undefined;
+	private static readonly viewType = 'copilotSkillUsage';
+
+	private readonly _panel: vscode.WebviewPanel;
+	private readonly _disposables: vscode.Disposable[] = [];
+	private _allowedPaths = new Set<string>();
+	private _scanning = false;
+
+	public static createOrShow(workspaceRoot?: string): void {
+		if (SkillUsagePanel.currentPanel) {
+			SkillUsagePanel.currentPanel._panel.reveal(vscode.ViewColumn.One);
+			void SkillUsagePanel.currentPanel._scan(workspaceRoot);
+			return;
+		}
+		const panel = vscode.window.createWebviewPanel(
+			SkillUsagePanel.viewType,
+			'Skill Usage Monitor',
+			vscode.ViewColumn.One,
+			{ enableScripts: true, retainContextWhenHidden: true },
+		);
+		SkillUsagePanel.currentPanel = new SkillUsagePanel(panel, workspaceRoot);
+	}
+
+	private constructor(panel: vscode.WebviewPanel, workspaceRoot?: string) {
+		this._panel = panel;
+		this._panel.webview.html = this._getHtml();
+		this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
+		this._panel.webview.onDidReceiveMessage(async (msg) => {
+			switch (msg.type) {
+				case 'ready':
+				case 'refresh':
+					await this._scan(workspaceRoot);
+					break;
+				case 'openFile': {
+					const p = msg.path as string;
+					if (!this._allowedPaths.has(p)) { return; }
+					try {
+						const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(p));
+						await vscode.window.showTextDocument(doc);
+					} catch (e) {
+						vscode.window.showErrorMessage(`Cannot open ${p}: ${(e as Error).message}`);
+					}
+					break;
+				}
+				case 'runClaudeCommand': {
+					const cmd = msg.command as string;
+					if (!CLAUDE_USAGE_COMMANDS.includes(cmd)) { return; }
+					const terminal = vscode.window.createTerminal({ name: `Claude Code ${cmd}`, cwd: workspaceRoot });
+					terminal.show();
+					terminal.sendText(`claude "${cmd}"`);
+					break;
+				}
+			}
+		}, null, this._disposables);
+	}
+
+	private async _scan(workspaceRoot?: string): Promise<void> {
+		if (this._scanning) { return; }
+		this._scanning = true;
+		const webview = this._panel.webview;
+		try {
+			const snapshot = await collectSkillUsage(workspaceRoot, SkillUsagePanel.userDataDir, message => {
+				webview.postMessage({ type: 'progress', message });
+			});
+			this._allowedPaths = new Set([
+				...snapshot.installed.map(s => s.file),
+				...snapshot.events.filter(e => e.skillPath).map(e => e.skillPath as string),
+			]);
+			webview.postMessage({ type: 'data', snapshot });
+		} catch (e) {
+			webview.postMessage({ type: 'error', message: (e as Error).message });
+		} finally {
+			this._scanning = false;
+		}
+	}
+
+	public dispose(): void {
+		SkillUsagePanel.currentPanel = undefined;
+		this._panel.dispose();
+		while (this._disposables.length) { this._disposables.pop()?.dispose(); }
+	}
+
+	private _getHtml(): string {
+		const nonce = getNonce();
+		const commandsJson = JSON.stringify(CLAUDE_USAGE_COMMANDS);
+		return /* html */`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root { --c-copilot: #4fc1ff; --c-claude: #d97757; --c-ok: #4ec9b0; --c-warn: #f0c040; }
+    body {
+      margin: 0; padding: 0 28px 56px 28px;
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+    }
+    .su-header {
+      padding: 20px 0 14px 0;
+      border-bottom: 1px solid var(--vscode-panel-border, #333);
+      margin-bottom: 16px;
+      display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    }
+    .su-title { margin: 0; font-size: 17px; font-weight: 700; }
+    .su-meta  { font-size: 12px; color: var(--vscode-descriptionForeground); }
+    /* toolbar */
+    .su-toolbar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; font-size: 12px; }
+    .su-toolbar label { color: var(--vscode-descriptionForeground); display: flex; gap: 6px; align-items: center; }
+    .su-toolbar select {
+      font-size: 12px; padding: 2px 4px;
+      background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground);
+      border: 1px solid var(--vscode-dropdown-border, transparent); border-radius: 2px;
+    }
+    .su-btn {
+      font-size: 12px; font-weight: 600; padding: 4px 14px;
+      border-radius: 3px; cursor: pointer; border: 1px solid transparent;
+      background: var(--vscode-button-background, #0078d4);
+      color: var(--vscode-button-foreground, #fff);
+    }
+    .su-btn:hover { background: var(--vscode-button-hoverBackground, #026ec1); }
+    .su-btn.secondary {
+      background: var(--vscode-button-secondaryBackground, #3a3d41);
+      color: var(--vscode-button-secondaryForeground, #fff);
+    }
+    .su-btn.secondary:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
+    .su-btn:disabled { opacity: .5; cursor: default; }
+    .su-status { font-size: 12px; color: var(--vscode-descriptionForeground); }
+    /* tiles */
+    .su-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
+    .su-tile {
+      padding: 10px 14px; border-radius: 6px;
+      background: var(--vscode-sideBar-background, rgba(0,0,0,.12));
+      border: 1px solid var(--vscode-panel-border, #333);
+    }
+    .su-tile-val { font-size: 22px; font-weight: 700; }
+    .su-tile-lbl { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 2px; }
+    .su-tile-sub { font-size: 11px; margin-top: 4px; }
+    /* section headers */
+    .su-cat-hdr {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .08em; margin: 24px 0 8px 0; padding-bottom: 4px;
+      border-bottom: 1px solid var(--vscode-panel-border, #444);
+      color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-foreground));
+      opacity: .85;
+    }
+    .su-note { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 4px 0 10px 0; line-height: 1.5; }
+    /* activity chart */
+    .su-chart { display: flex; align-items: flex-end; gap: 2px; height: 110px; padding: 4px 0; border-bottom: 1px solid var(--vscode-panel-border, #444); }
+    .su-bar { flex: 1; display: flex; flex-direction: column-reverse; min-width: 2px; height: 100%; }
+    .su-bar:hover { background: var(--vscode-list-hoverBackground); }
+    .su-seg-copilot { background: var(--c-copilot); }
+    .su-seg-claude  { background: var(--c-claude); }
+    .su-axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--vscode-descriptionForeground); margin-top: 3px; }
+    .su-legend { display: flex; gap: 14px; font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 6px; }
+    .su-dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+    /* table */
+    table.su-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .su-table th {
+      text-align: left; font-weight: 600; font-size: 11px; padding: 5px 6px;
+      color: var(--vscode-descriptionForeground);
+      border-bottom: 1px solid var(--vscode-panel-border, #444);
+      cursor: pointer; user-select: none; white-space: nowrap;
+    }
+    .su-table th.num, .su-table td.num { text-align: right; }
+    .su-table th.sorted { color: var(--vscode-foreground); }
+    .su-table td { padding: 5px 6px; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,.15)); vertical-align: top; }
+    .su-table tr:hover td { background: var(--vscode-list-hoverBackground); }
+    .su-name { font-weight: 600; }
+    .su-link { color: var(--vscode-textLink-foreground); cursor: pointer; }
+    .su-link:hover { text-decoration: underline; }
+    .su-usebar { display: inline-flex; height: 6px; width: 80px; border-radius: 2px; overflow: hidden; background: rgba(128,128,128,.15); vertical-align: middle; margin-left: 6px; }
+    .su-badge {
+      display: inline-block; font-size: 9px; font-weight: 700;
+      padding: 1px 5px; border-radius: 3px; margin: 0 3px 2px 0;
+      text-transform: uppercase; letter-spacing: .03em; white-space: nowrap;
+    }
+    .b-workspace { background: rgba(0,122,204,.15); color: #4fc1ff; border: 1px solid rgba(0,122,204,.3); }
+    .b-personal  { background: rgba(180,100,220,.15); color: #d7a0f7; border: 1px solid rgba(180,100,220,.3); }
+    .b-plugin    { background: rgba(217,119,87,.15); color: #e8a080; border: 1px solid rgba(217,119,87,.35); }
+    .b-builtin   { background: rgba(128,128,128,.15); color: var(--vscode-descriptionForeground); border: 1px solid rgba(128,128,128,.3); }
+    .b-elsewhere { background: transparent; color: var(--vscode-descriptionForeground); border: 1px dashed rgba(128,128,128,.5); }
+    .b-unused    { background: rgba(240,192,64,.12); color: var(--c-warn); border: 1px solid rgba(240,192,64,.35); }
+    .muted { color: var(--vscode-descriptionForeground); }
+    /* command cards */
+    .su-cmds { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+    .su-cmd {
+      padding: 10px 12px; border-radius: 6px;
+      border: 1px solid var(--vscode-panel-border, #333);
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .su-cmd code { font-family: var(--vscode-editor-font-family, monospace); font-weight: 700; font-size: 13px; }
+    .su-cmd p { margin: 0; font-size: 11px; color: var(--vscode-descriptionForeground); line-height: 1.5; flex: 1; }
+    .su-cmd .su-btn { align-self: flex-start; }
+    .su-sources td { font-size: 11px; }
+    .su-path { font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; color: var(--vscode-descriptionForeground); word-break: break-all; }
+    .su-empty { padding: 14px 0; color: var(--vscode-descriptionForeground); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="su-header">
+    <h1 class="su-title">📈 Skill Usage Monitor</h1>
+    <span class="su-meta" id="suMeta"></span>
+  </div>
+
+  <div class="su-toolbar">
+    <label>Period
+      <select id="selPeriod">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="365">Last 12 months</option>
+        <option value="0">All time</option>
+      </select>
+    </label>
+    <label>Agent
+      <select id="selSource">
+        <option value="all">Copilot + Claude Code</option>
+        <option value="copilot">GitHub Copilot</option>
+        <option value="claude">Claude Code</option>
+      </select>
+    </label>
+    <label>Workspace
+      <select id="selWorkspace">
+        <option value="all">All workspaces</option>
+        <option value="current">Current workspace</option>
+      </select>
+    </label>
+    <button class="su-btn" id="btnRefresh">↻ Refresh</button>
+    <span class="su-status" id="suStatus">Scanning…</span>
+  </div>
+
+  <div id="suContent"><div class="su-empty">Scanning local usage logs…</div></div>
+
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    const CLAUDE_COMMANDS = ${commandsJson};
+    const DAY = 86400000;
+    let snapshot = null;
+    let sortKey = 'uses', sortDir = -1;
+
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function samePath(a, b) {
+      const norm = (p) => p.replace(/[\\\\/]+/g, '/').replace(/\\/$/, '').toLowerCase();
+      return !!a && !!b && norm(a) === norm(b);
+    }
+    function baseName(p) {
+      const parts = String(p).split(/[\\\\/]/).filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : p;
+    }
+    function fmtAgo(t) {
+      if (!t) { return '—'; }
+      const d = Math.floor((Date.now() - t) / DAY);
+      if (d <= 0) { return 'today'; }
+      if (d === 1) { return 'yesterday'; }
+      if (d < 60) { return d + ' days ago'; }
+      return new Date(t).toLocaleDateString();
+    }
+    function fmtDate(t) { return t ? new Date(t).toLocaleString() : ''; }
+
+    function filters() {
+      const days = Number(document.getElementById('selPeriod').value);
+      return {
+        days,
+        cutoff: days ? Date.now() - days * DAY : 0,
+        source: document.getElementById('selSource').value,
+        currentOnly: document.getElementById('selWorkspace').value === 'current',
+      };
+    }
+
+    function filteredEvents(f) {
+      return snapshot.events.filter(e =>
+        e.timestamp >= f.cutoff &&
+        (f.source === 'all' || e.source === f.source) &&
+        (!f.currentOnly || samePath(e.workspace, snapshot.currentWorkspace)));
+    }
+
+    function buildRows(f, events) {
+      const rows = new Map();
+      const row = (name) => {
+        if (!rows.has(name)) {
+          rows.set(name, { name, copilot: 0, claude: 0, last: 0, workspaces: new Set(), installed: [], usedPaths: new Set(), counter: null });
+        }
+        return rows.get(name);
+      };
+      for (const e of events) {
+        const r = row(e.skill);
+        r[e.source]++;
+        r.last = Math.max(r.last, e.timestamp);
+        if (e.workspace) { r.workspaces.add(e.workspace); }
+        if (e.skillPath) { r.usedPaths.add(e.skillPath); }
+      }
+      for (const s of snapshot.installed) {
+        if (s.scope === 'builtin' && !rows.has(s.name)) { continue; }
+        row(s.name).installed.push(s);
+      }
+      if (f.source !== 'copilot') {
+        for (const [name, c] of Object.entries(snapshot.claudeSkillCounters)) {
+          const r = row(name);
+          r.counter = c;
+          // The all-time counter is not per-workspace, so it can't vouch for "current workspace".
+          if (!f.currentOnly && c.lastUsedAt && c.lastUsedAt >= f.cutoff) { r.last = Math.max(r.last, c.lastUsedAt); }
+        }
+      }
+      for (const r of rows.values()) {
+        r.uses = r.copilot + r.claude;
+        r.unused = r.uses === 0 && !(r.last && r.last >= f.cutoff) && r.installed.some(s => s.scope !== 'builtin');
+      }
+      return Array.from(rows.values()).filter(r => r.uses > 0 || r.installed.length > 0 || (r.counter && r.counter.usageCount > 0));
+    }
+
+    function renderTiles(f, events, rows) {
+      const copilot = events.filter(e => e.source === 'copilot').length;
+      const claude = events.length - copilot;
+      const used = rows.filter(r => r.uses > 0).length;
+      const installed = rows.filter(r => r.installed.some(s => s.scope !== 'builtin')).length;
+      const unused = rows.filter(r => r.unused).length;
+      const top = rows.slice().sort((a, b) => b.uses - a.uses)[0];
+      return '<div class="su-tiles">' +
+        tile(events.length, 'skill loads', '<span style="color:var(--c-copilot)">' + copilot + ' Copilot</span> · <span style="color:var(--c-claude)">' + claude + ' Claude</span>') +
+        tile(used, 'distinct skills used', top && top.uses ? 'top: <strong>' + esc(top.name) + '</strong> (' + top.uses + ')' : '') +
+        tile(installed, 'installed skills', 'workspace + personal + plugins') +
+        tile(unused, 'installed but unused', unused ? '<span style="color:var(--c-warn)">candidates for cleanup</span>' : '<span style="color:var(--c-ok)">every skill was used</span>') +
+        '</div>';
+      function tile(v, lbl, sub) {
+        return '<div class="su-tile"><div class="su-tile-val">' + v + '</div><div class="su-tile-lbl">' + lbl + '</div>' +
+          (sub ? '<div class="su-tile-sub">' + sub + '</div>' : '') + '</div>';
+      }
+    }
+
+    function renderChart(f, events) {
+      if (!events.length) { return ''; }
+      const end = Date.now();
+      const start = f.cutoff || events[0].timestamp;
+      const spanDays = Math.max(1, Math.ceil((end - start) / DAY));
+      const bucketDays = spanDays <= 92 ? 1 : spanDays <= 400 ? 7 : 30;
+      const n = Math.ceil(spanDays / bucketDays);
+      const buckets = Array.from({ length: n }, () => ({ copilot: 0, claude: 0 }));
+      for (const e of events) {
+        const i = Math.min(n - 1, Math.max(0, Math.floor((e.timestamp - (end - n * bucketDays * DAY)) / (bucketDays * DAY))));
+        buckets[i][e.source]++;
+      }
+      const max = Math.max(1, ...buckets.map(b => b.copilot + b.claude));
+      const unit = bucketDays === 1 ? 'day' : bucketDays === 7 ? 'week' : 'month';
+      let html = '<div class="su-cat-hdr">Activity <span style="font-weight:400;opacity:.7">(per ' + unit + ')</span></div><div class="su-chart">';
+      buckets.forEach((b, i) => {
+        const from = new Date(end - (n - i) * bucketDays * DAY);
+        const tip = from.toLocaleDateString() + ' — ' + b.copilot + ' Copilot, ' + b.claude + ' Claude Code';
+        html += '<div class="su-bar" title="' + esc(tip) + '">' +
+          '<div class="su-seg-copilot" style="height:' + (b.copilot / max * 100) + '%"></div>' +
+          '<div class="su-seg-claude" style="height:' + (b.claude / max * 100) + '%"></div></div>';
+      });
+      html += '</div><div class="su-axis"><span>' + new Date(end - n * bucketDays * DAY).toLocaleDateString() + '</span><span>peak ' + max + ' / ' + unit + '</span><span>today</span></div>';
+      html += '<div class="su-legend"><span><span class="su-dot" style="background:var(--c-copilot)"></span>GitHub Copilot</span><span><span class="su-dot" style="background:var(--c-claude)"></span>Claude Code</span></div>';
+      return html;
+    }
+
+    function whereBadges(r) {
+      let html = '';
+      const seen = new Set();
+      for (const s of r.installed) {
+        const key = s.scope + s.location;
+        if (seen.has(key)) { continue; }
+        seen.add(key);
+        html += '<span class="su-badge b-' + s.scope + '" title="' + esc(s.dir) + '">' + esc(s.scope === 'builtin' ? 'built-in' : s.scope) + '</span>';
+      }
+      if (!r.installed.length) {
+        const paths = Array.from(r.usedPaths);
+        html += '<span class="su-badge b-elsewhere" title="' + esc(paths.join('\\n') || 'Not installed here') + '">' + (paths.length ? 'other workspace' : 'not installed here') + '</span>';
+      }
+      if (r.unused) { html += '<span class="su-badge b-unused">unused</span>'; }
+      return html;
+    }
+
+    function renderTable(f, rows) {
+      const cols = [
+        ['name', 'Skill', ''],
+        ['where', 'Installed', ''],
+        ['uses', 'Uses', 'num'],
+        ['copilot', 'Copilot', 'num'],
+        ['claude', 'Claude', 'num'],
+        ['counter', 'Claude all-time', 'num'],
+        ['last', 'Last used', ''],
+        ['workspaces', 'Workspaces', ''],
+      ];
+      const val = (r, k) => k === 'name' ? r.name.toLowerCase()
+        : k === 'where' ? (r.installed[0] ? r.installed[0].scope : 'zz')
+        : k === 'counter' ? (r.counter ? r.counter.usageCount : -1)
+        : k === 'workspaces' ? r.workspaces.size
+        : r[k];
+      rows.sort((a, b) => {
+        const x = val(a, sortKey), y = val(b, sortKey);
+        if (x < y) { return -sortDir; }
+        if (x > y) { return sortDir; }
+        return (b.last - a.last) || a.name.localeCompare(b.name);
+      });
+      const max = Math.max(1, ...rows.map(r => r.uses));
+      let html = '<div class="su-cat-hdr">Skills <span style="font-weight:400;opacity:.7">(' + rows.length + ')</span></div>';
+      if (!rows.length) { return html + '<div class="su-empty">No skills installed or used for this selection.</div>'; }
+      html += '<table class="su-table"><thead><tr>';
+      for (const [k, lbl, cls] of cols) {
+        const arrow = sortKey === k ? (sortDir < 0 ? ' ▾' : ' ▴') : '';
+        html += '<th class="' + cls + (sortKey === k ? ' sorted' : '') + '" data-sort="' + k + '">' + lbl + arrow + '</th>';
+      }
+      html += '</tr></thead><tbody>';
+      for (const r of rows) {
+        const file = r.installed.length ? r.installed[0].file : (r.usedPaths.size ? Array.from(r.usedPaths)[0] : '');
+        const name = file
+          ? '<span class="su-link su-name" data-open="' + esc(file) + '">' + esc(r.name) + '</span>'
+          : '<span class="su-name">' + esc(r.name) + '</span>';
+        const wsList = Array.from(r.workspaces);
+        html += '<tr>' +
+          '<td>' + name + '</td>' +
+          '<td>' + whereBadges(r) + '</td>' +
+          '<td class="num">' + r.uses +
+            '<span class="su-usebar"><span class="su-seg-copilot" style="width:' + (r.copilot / max * 100) + '%"></span><span class="su-seg-claude" style="width:' + (r.claude / max * 100) + '%"></span></span></td>' +
+          '<td class="num">' + (r.copilot || '<span class="muted">0</span>') + '</td>' +
+          '<td class="num">' + (r.claude || '<span class="muted">0</span>') + '</td>' +
+          '<td class="num">' + (r.counter ? r.counter.usageCount : '<span class="muted">—</span>') + '</td>' +
+          '<td title="' + esc(fmtDate(r.last)) + '">' + (r.last ? fmtAgo(r.last) : '<span class="muted">never</span>') + '</td>' +
+          '<td title="' + esc(wsList.join('\\n')) + '">' + (wsList.length ? esc(wsList.slice(0, 2).map(baseName).join(', ')) + (wsList.length > 2 ? ' +' + (wsList.length - 2) : '') : '<span class="muted">—</span>') + '</td>' +
+          '</tr>';
+      }
+      html += '</tbody></table>';
+      html += '<div class="su-note">Uses = skill loads in the selected period, read from local logs. Copilot counts one load per chat request; Claude Code counts each Skill tool call or /skill command. ' +
+        '"Claude all-time" is the counter Claude Code keeps in ~/.claude.json — it can exceed the transcript count because transcripts are pruned after cleanupPeriodDays (30 days by default).</div>';
+      return html;
+    }
+
+    function renderPlugins() {
+      const plugins = snapshot.claudePlugins.slice().sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0));
+      if (!plugins.length) { return ''; }
+      let html = '<div class="su-cat-hdr">Claude Code plugins <span style="font-weight:400;opacity:.7">(' + plugins.length + ')</span></div>';
+      html += '<table class="su-table"><thead><tr><th>Plugin</th><th class="num">Uses</th><th>Last activity</th><th>Status</th></tr></thead><tbody>';
+      for (const p of plugins) {
+        const stale = !p.usageCount || !p.lastUsedAt || Date.now() - p.lastUsedAt > 30 * DAY;
+        html += '<tr><td class="su-name">' + esc(p.name) + '</td><td class="num">' + p.usageCount + '</td>' +
+          '<td title="' + esc(fmtDate(p.lastUsedAt)) + '">' + fmtAgo(p.lastUsedAt) + '</td>' +
+          '<td>' + (stale ? '<span class="su-badge b-unused">not used recently</span>' : '<span class="su-badge b-workspace">active</span>') + '</td></tr>';
+      }
+      html += '</tbody></table><div class="su-note">From pluginUsage in ~/.claude.json — the same data /plugin uses for its "Not used recently" label.</div>';
+      return html;
+    }
+
+    function renderCommands() {
+      const info = {
+        '/skill-doctor': 'Health report for your skills, including a "Find unused skills" section.',
+        '/doctor': 'Installation diagnostics; lists plugins that are not being used.',
+        '/plugin': 'Plugin manager; flags plugins as "Not used recently".',
+        '/usage': 'Pro / Max / Team / Enterprise plans: share of recent usage attributed to skills, subagents, plugins and MCP servers.',
+      };
+      let html = '<div class="su-cat-hdr">Claude Code built-in reports</div>';
+      html += '<div class="su-note">These interactive commands read the same local data. Each button opens a terminal and starts <code>claude</code> with the command (requires the Claude Code CLI on PATH).</div>';
+      html += '<div class="su-cmds">';
+      for (const cmd of CLAUDE_COMMANDS) {
+        html += '<div class="su-cmd"><code>' + esc(cmd) + '</code><p>' + esc(info[cmd] || '') + '</p>' +
+          '<button class="su-btn secondary" data-cmd="' + esc(cmd) + '">▶ Run in terminal</button></div>';
+      }
+      return html + '</div>';
+    }
+
+    function renderSources() {
+      let html = '<div class="su-cat-hdr">Data sources</div><table class="su-table su-sources"><tbody>';
+      for (const s of snapshot.sources) {
+        html += '<tr><td>' + (s.found ? '<span style="color:var(--c-ok)">✓</span>' : '<span class="muted">·</span>') + '</td>' +
+          '<td>' + esc(s.label) + '<div class="su-path">' + esc(s.path) + '</div></td>' +
+          '<td class="num">' + (s.found ? s.files + ' file' + (s.files !== 1 ? 's' : '') : 'not found') + '</td>' +
+          '<td class="num">' + s.events + ' record' + (s.events !== 1 ? 's' : '') + '</td></tr>';
+      }
+      return html + '</tbody></table><div class="su-note">Everything is read locally; nothing leaves your machine.</div>';
+    }
+
+    function render() {
+      if (!snapshot) { return; }
+      const f = filters();
+      const events = filteredEvents(f);
+      const rows = buildRows(f, events);
+      document.getElementById('suContent').innerHTML =
+        renderTiles(f, events, rows) + renderChart(f, events) + renderTable(f, rows) +
+        (f.source !== 'copilot' ? renderPlugins() : '') + renderCommands() + renderSources();
+      document.getElementById('suMeta').textContent =
+        (snapshot.currentWorkspace ? 'Workspace: ' + baseName(snapshot.currentWorkspace) + '  ·  ' : '') +
+        'Scanned: ' + new Date(snapshot.generatedAt).toLocaleString();
+    }
+
+    document.getElementById('suContent').addEventListener('click', (ev) => {
+      const t = ev.target.closest('[data-sort],[data-open],[data-cmd]');
+      if (!t) { return; }
+      if (t.dataset.sort) {
+        if (sortKey === t.dataset.sort) { sortDir = -sortDir; }
+        else { sortKey = t.dataset.sort; sortDir = t.dataset.sort === 'name' || t.dataset.sort === 'where' ? 1 : -1; }
+        render();
+      } else if (t.dataset.open) {
+        vscode.postMessage({ type: 'openFile', path: t.dataset.open });
+      } else if (t.dataset.cmd) {
+        vscode.postMessage({ type: 'runClaudeCommand', command: t.dataset.cmd });
+      }
+    });
+    for (const id of ['selPeriod', 'selSource', 'selWorkspace']) {
+      document.getElementById(id).addEventListener('change', render);
+    }
+    document.getElementById('btnRefresh').addEventListener('click', () => {
+      document.getElementById('btnRefresh').disabled = true;
+      document.getElementById('suStatus').textContent = 'Scanning…';
+      vscode.postMessage({ type: 'refresh' });
+    });
+
+    window.addEventListener('message', (ev) => {
+      const msg = ev.data;
+      switch (msg.type) {
+        case 'progress':
+          document.getElementById('suStatus').textContent = msg.message;
+          break;
+        case 'data':
+          snapshot = msg.snapshot;
+          document.getElementById('btnRefresh').disabled = false;
+          document.getElementById('suStatus').textContent = snapshot.events.length + ' skill loads found';
+          if (!snapshot.currentWorkspace) { document.getElementById('selWorkspace').disabled = true; }
+          render();
+          break;
+        case 'error':
+          document.getElementById('btnRefresh').disabled = false;
+          document.getElementById('suStatus').textContent = 'Scan failed: ' + msg.message;
+          break;
+      }
+    });
+
+    vscode.postMessage({ type: 'ready' });
+  </script>
+</body>
+</html>`;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Activation
 // ---------------------------------------------------------------------------
 
 export function activate(context: vscode.ExtensionContext) {
 	const provider = new CopilotChecksViewProvider(context.extensionUri);
+	// <user dir>/globalStorage/<extension id> → <user dir> (handles Insiders, portable installs, …)
+	SkillUsagePanel.userDataDir = path.dirname(path.dirname(context.globalStorageUri.fsPath));
 
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(
@@ -4827,6 +5770,9 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('salesforce-copilot-inspector.refresh', () => {
 			provider.refresh();
 		}),
+		vscode.commands.registerCommand('salesforce-copilot-inspector.openSkillUsage', () => {
+			SkillUsagePanel.createOrShow(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
+		}),
 	);
 
 	// Dispose editor panels when the extension deactivates
@@ -4835,6 +5781,9 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 	context.subscriptions.push({
 		dispose: () => SummaryPanel.currentPanel?.dispose(),
+	});
+	context.subscriptions.push({
+		dispose: () => SkillUsagePanel.currentPanel?.dispose(),
 	});
 	// Kill any "Run Server" test instances when the extension deactivates.
 	context.subscriptions.push({

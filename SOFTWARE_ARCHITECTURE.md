@@ -310,6 +310,29 @@ sequenceDiagram
     EH-->>WV: { type: 'batchDone' }
 ```
 
+### 5.4 Skill Usage Monitor (`SkillUsagePanel`)
+
+```mermaid
+sequenceDiagram
+    participant WV as Usage Webview
+    participant EH as Extension Host
+
+    WV->>EH: { type: 'ready' } / { type: 'refresh' }
+    EH-->>WV: { type: 'progress', message }  [while scanning]
+    EH-->>WV: { type: 'data', snapshot }
+
+    WV->>EH: { type: 'openFile', path }          [only paths present in the snapshot]
+    WV->>EH: { type: 'runClaudeCommand', command }  [whitelist: /skill-doctor, /doctor, /plugin, /usage]
+```
+
+`collectSkillUsage()` builds the snapshot from local traces only:
+
+- **Copilot** — `parseCopilotChatSession()` reads `workspaceStorage/*/chatSessions/*.json(l)` (legacy JSON and the `kind`/`k`/`v` mutation log). A skill load is a `Reading skill [name](file:///…/SKILL.md?vscodeLinkType%3Dskill)` tool message or a `vscode.prompt.file__…/SKILL.md` variable (user typed `/name`); counted once per request, timestamped with the request.
+- **Claude Code** — `parseClaudeTranscriptLine()` reads `~/.claude/projects/**/*.jsonl` for assistant `Skill` tool calls (deduplicated by `tool_use` id) and `/name` commands (kept only when the name is a known skill); `~/.claude.json` supplies the all-time `skillUsage` / `pluginUsage` counters.
+- **Installed skills** — workspace and personal `skills/` folders plus Claude Code plugins from `~/.claude/plugins/installed_plugins.json`.
+
+Parsed results are cached per file (mtime + size), so a refresh only re-reads changed logs. Period, agent and workspace filters are applied in the webview.
+
 ---
 
 ## 6. Skill Validation Engine

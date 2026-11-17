@@ -11,6 +11,9 @@ import {
 	validateSkillLocal,
 	getTemplate,
 	getCheckDescription,
+	extractCopilotSkillReads,
+	parseCopilotChatSession,
+	parseClaudeTranscriptLine,
 	type CheckResult,
 } from '../extension';
 
@@ -517,5 +520,87 @@ suite('getCheckDescription', () => {
 	test('unknown id returns an empty string', () => {
 		const desc = getCheckDescription(makeCheck('completely-unknown-id-xyz'));
 		assert.strictEqual(desc, '');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Skill usage monitor parsers
+// ---------------------------------------------------------------------------
+
+suite('extractCopilotSkillReads', () => {
+	const uri = 'file:///c%3A/proj/.github/skills/apex-gen/SKILL.md';
+
+	test('extracts a "Reading skill" link once per SKILL.md', () => {
+		const text = `Reading skill [apex-gen](${uri}?vscodeLinkType%3Dskill#1-1), lines 1 to 120 ` +
+			`Read skill [apex-gen](${uri}?vscodeLinkType%3Dskill#1-1)`;
+		assert.deepStrictEqual(extractCopilotSkillReads(text), [{ name: 'apex-gen', uri }]);
+	});
+
+	test('extracts a /skill prompt-file invocation, naming it after its folder', () => {
+		const text = `{"id":"vscode.prompt.file__file:///c%3A/x/skills/my%20skill/SKILL.md","name":"prompt:SKILL.md"}`;
+		assert.deepStrictEqual(extractCopilotSkillReads(text), [{ name: 'my skill', uri: 'file:///c%3A/x/skills/my%20skill/SKILL.md' }]);
+	});
+
+	test('ignores plain links to SKILL.md files', () => {
+		assert.deepStrictEqual(extractCopilotSkillReads('[docs](https://github.com/o/r/blob/main/skills/a/SKILL.md)'), []);
+	});
+});
+
+suite('parseCopilotChatSession', () => {
+	const link = (name: string) => `Reading skill [${name}](file:///c%3A/p/.github/skills/${name}/SKILL.md?vscodeLinkType%3Dskill#1-1)`;
+	const request = (ts: number, ...skills: string[]) => ({
+		timestamp: ts,
+		response: skills.map(s => ({ kind: 'toolInvocationSerialized', invocationMessage: { value: link(s) } })),
+	});
+
+	test('returns nothing when the file has no skill trace', () => {
+		assert.deepStrictEqual(parseCopilotChatSession('{"kind":0,"v":{"requests":[]}}', true), []);
+	});
+
+	test('reads the legacy .json format with request timestamps', () => {
+		const raw = JSON.stringify({ requests: [request(100, 'a'), request(200, 'b', 'a')] });
+		const reads = parseCopilotChatSession(raw, false).map(r => `${r.name}@${r.timestamp}`).sort();
+		assert.deepStrictEqual(reads, ['a@100', 'a@200', 'b@200']);
+	});
+
+	test('follows the .jsonl mutation log and counts chunked reads once per request', () => {
+		const lines = [
+			{ kind: 0, v: { requests: [] } },
+			{ kind: 2, k: ['requests'], v: [{ timestamp: 1000, response: [] }] },
+			{ kind: 2, k: ['requests', 0, 'response'], v: [{ invocationMessage: { value: link('a') } }] },
+			{ kind: 2, k: ['requests', 0, 'response'], v: [{ invocationMessage: { value: link('a') } }] },
+			{ kind: 2, k: ['requests'], v: [request(2000, 'b')] },
+		].map(l => JSON.stringify(l)).join('\n');
+		const reads = parseCopilotChatSession(lines, true).map(r => `${r.name}@${r.timestamp}`).sort();
+		assert.deepStrictEqual(reads, ['a@1000', 'b@2000']);
+	});
+});
+
+suite('parseClaudeTranscriptLine', () => {
+	test('extracts Skill tool calls from assistant messages', () => {
+		const line = JSON.stringify({
+			type: 'assistant', timestamp: '2026-10-22T08:13:24.151Z', cwd: 'c:\\proj',
+			message: { content: [{ type: 'text', text: 'hi' }, { type: 'tool_use', id: 'toolu_1', name: 'Skill', input: { skill: 'run' } }] },
+		});
+		assert.deepStrictEqual(parseClaudeTranscriptLine(line), [
+			{ skill: 'run', timestamp: Date.parse('2026-10-22T08:13:24.151Z'), cwd: 'c:\\proj', id: 'toolu_1', slash: false },
+		]);
+	});
+
+	test('extracts user slash commands flagged as slash', () => {
+		const line = JSON.stringify({
+			type: 'user', timestamp: '2026-10-22T08:00:00Z',
+			message: { content: '<command-message>verify</command-message>\n<command-name>/verify</command-name>' },
+		});
+		const hits = parseClaudeTranscriptLine(line);
+		assert.strictEqual(hits.length, 1);
+		assert.strictEqual(hits[0].skill, 'verify');
+		assert.strictEqual(hits[0].slash, true);
+	});
+
+	test('ignores tool definitions and other record types', () => {
+		const line = JSON.stringify({ type: 'api-request-blob', message: { tools: [{ name: 'Skill' }] } });
+		assert.deepStrictEqual(parseClaudeTranscriptLine(line), []);
+		assert.deepStrictEqual(parseClaudeTranscriptLine('not json "name":"Skill"'), []);
 	});
 });

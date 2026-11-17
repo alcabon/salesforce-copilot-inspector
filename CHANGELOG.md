@@ -4,6 +4,13 @@ All notable changes to the "salesforce-copilot-inspector" extension will be docu
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [Unreleased]
+
+- Skill Usage Monitor: new editor panel showing how often GitHub Copilot and Claude Code use each skill, read from local chat sessions, Claude Code transcripts and `~/.claude.json` counters
+- Skill Usage Monitor: activity chart, per-skill table (uses, last use, workspaces, install location), unused installed skills, Claude Code plugin usage
+- Skill Usage Monitor: period / agent / current-workspace filters and buttons that run `/skill-doctor`, `/doctor`, `/plugin` and `/usage` in a terminal
+- Sidebar: new 📈 Usage button next to Summary; new "Open Skill Usage Monitor" command
+
 ## [0.2.0]
 
 - Salesforce Skills Library: added checkboxes to the skills table for selecting several skills at once
