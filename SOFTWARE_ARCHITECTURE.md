@@ -161,7 +161,8 @@ classDiagram
         -_update()
         -_fetchSkillsList()
         -_fetchSkillDetail(skillName)
-        -_installSkill(payload)
+        -_installSkills(names)
+        -_downloadSkill(name, dir, token)
         -_getHtmlForWebview(webview)
     }
 
@@ -276,8 +277,10 @@ sequenceDiagram
     GH-->>EH: raw content
     EH-->>WV: { type: 'skillDetail', detail }
 
-    WV->>EH: { type: 'installSkill', skillName, scope, content }
-    EH-->>WV: { type: 'installResult', ok, message }
+    WV->>EH: { type: 'installSkills', skillNames }  (or 'installSkill' for one row)
+    EH-->>WV: { type: 'installStarted', skillName, index, total }  (per skill)
+    EH-->>WV: { type: 'installResult', skillName, success, filePath | message, warning? }  (per skill)
+    EH-->>WV: { type: 'installBatchDone' }
 
     WV->>EH: { type: 'checkSkill', skillName, scope }
     EH-->>WV: { type: 'checkResult', skillName, result }

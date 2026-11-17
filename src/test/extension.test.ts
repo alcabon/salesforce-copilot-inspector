@@ -14,6 +14,8 @@ import {
 	extractCopilotSkillReads,
 	parseCopilotChatSession,
 	parseClaudeTranscriptLine,
+	deleteTargetFor,
+	CATEGORY_HELP,
 	type CheckResult,
 } from '../extension';
 
@@ -159,6 +161,34 @@ suite('parseMetadataBlockLocal', () => {
 		const result = parseMetadataBlockLocal(raw);
 		assert.ok(result !== null && result !== 'scalar' && result !== 'list');
 		assert.strictEqual(result.version, '2.5');
+	});
+
+	test('returns list for a sequence at the key indentation', () => {
+		assert.strictEqual(parseMetadataBlockLocal('metadata:\n- item1\n- item2'), 'list');
+	});
+
+	test('treats nested lists inside the map as values, not as a list (forcedotcom/sf-skills layout)', () => {
+		const raw = [
+			'name: platform-apex-test-run',
+			'metadata:',
+			'  version: "1.2"',
+			'  domains: ["Platform"]',
+			'',
+			'  relatedSkills:',
+			'    - "agentforce-test"',
+			'    - "platform-apex-generate"',
+			'  cliTools:',
+			'    - tool: ["jq"]',
+			'      semver: ">=1.6.0"',
+			'description: "x"',
+		].join('\n');
+		const result = parseMetadataBlockLocal(raw);
+		assert.ok(result !== null && result !== 'scalar' && result !== 'list');
+		assert.strictEqual(result.version, '1.2');
+		assert.strictEqual(result.domains, '["Platform"]');
+		assert.strictEqual(result.tool, undefined);
+		assert.strictEqual(result.semver, undefined);
+		assert.strictEqual(result.description, undefined);
 	});
 
 	test('stops reading at the next top-level key', () => {
@@ -603,4 +633,54 @@ suite('parseClaudeTranscriptLine', () => {
 		assert.deepStrictEqual(parseClaudeTranscriptLine(line), []);
 		assert.deepStrictEqual(parseClaudeTranscriptLine('not json "name":"Skill"'), []);
 	});
+});
+
+// ---------------------------------------------------------------------------
+// deleteTargetFor
+// ---------------------------------------------------------------------------
+
+suite('deleteTargetFor', () => {
+	test('a skill SKILL.md resolves to its whole skill folder', () => {
+		const skillMd = path.join('ws', '.github', 'skills', 'platform-apex-generate', 'SKILL.md');
+		assert.strictEqual(deleteTargetFor(skillMd), path.join('ws', '.github', 'skills', 'platform-apex-generate'));
+	});
+
+	test('a personal skill SKILL.md resolves to its skill folder', () => {
+		const skillMd = path.join(os.homedir(), '.copilot', 'skills', 'my-skill', 'SKILL.md');
+		assert.strictEqual(deleteTargetFor(skillMd), path.join(os.homedir(), '.copilot', 'skills', 'my-skill'));
+	});
+
+	test('other files are deleted on their own', () => {
+		const instr = path.join('ws', '.github', 'instructions', 'apex.instructions.md');
+		assert.strictEqual(deleteTargetFor(instr), instr);
+		const stray = path.join('ws', 'docs', 'SKILL.md');
+		assert.strictEqual(deleteTargetFor(stray), stray);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// CATEGORY_HELP
+// ---------------------------------------------------------------------------
+
+suite('CATEGORY_HELP', () => {
+	const CHECK_CATEGORIES = ['Instructions', 'Skills', 'Prompts', 'Agents', 'Copilot Hooks', 'Extensions', 'Settings'];
+	const REQUIRED_SECTIONS = ['When it is triggered', 'Format', 'Location', 'Common use', 'What this tab checks'];
+
+	test('covers every Checks-tab category', () => {
+		assert.deepStrictEqual(Object.keys(CATEGORY_HELP).sort(), [...CHECK_CATEGORIES].sort());
+	});
+
+	for (const cat of CHECK_CATEGORIES) {
+		test(`${cat}: has a summary and the required sections with content`, () => {
+			const help = CATEGORY_HELP[cat];
+			assert.ok(help.summary.length > 0);
+			const titles = help.sections.map(s => s.title);
+			for (const req of REQUIRED_SECTIONS) {
+				assert.ok(titles.includes(req), `${cat} is missing "${req}"`);
+			}
+			for (const s of help.sections) {
+				assert.ok(s.text || s.items?.length || s.code, `${cat} › ${s.title} is empty`);
+			}
+		});
+	}
 });

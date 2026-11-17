@@ -6,10 +6,25 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.3.0]
+
+### Added
+
 - Skill Usage Monitor: new editor panel showing how often GitHub Copilot and Claude Code use each skill, read from local chat sessions, Claude Code transcripts and `~/.claude.json` counters
 - Skill Usage Monitor: activity chart, per-skill table (uses, last use, workspaces, install location), unused installed skills, Claude Code plugin usage
 - Skill Usage Monitor: period / agent / current-workspace filters and buttons that run `/skill-doctor`, `/doctor`, `/plugin` and `/usage` in a terminal
 - Sidebar: new 📈 Usage button next to Summary; new "Open Skill Usage Monitor" command
+- Checks tab: new **Help** button on each category header (Instructions, Skills, Prompts, Agents, Copilot Hooks, Extensions, Settings) opening a popup with: when it is triggered, format, location, common use, an example, tips and what the tab checks
+- Salesforce Skills Library: batch installs run behind a cancellable progress notification and end with a summary; installed skills are unticked, failed ones stay selected for a retry
+
+### Fixed
+
+- Salesforce Skills Library: "Install Selected" asks for the install location once for the whole batch instead of once per skill (the repeated pickers were dismissed and cancelled the batch)
+- Salesforce Skills Library: GitHub downloads now time out after 20 s, so a stalled request can no longer leave an install hanging
+- Salesforce Skills Library: binary assets are written byte-for-byte instead of being corrupted by UTF-8 decoding; a references/assets download failure (e.g. GitHub rate limit) is now reported instead of silently ignored
+- Salesforce Skills Library: ↻ Refresh now clears the "installed" badge of skills deleted from disk (the installed list was only ever added to)
+- Checks tab: deleting a skill now removes its whole folder (`SKILL.md`, `references/`, `assets/`) instead of only `SKILL.md`, which left an orphaned folder behind
+- Skill validation: fixed a false "metadata must be a key-value map, not a YAML list" error on skills whose `metadata:` map contains nested lists (e.g. `relatedSkills:` in forcedotcom/sf-skills); only the map's direct children are now considered
 
 ## [0.2.0]
 

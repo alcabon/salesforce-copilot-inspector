@@ -1,6 +1,6 @@
 # Test Suite — Salesforce Github Inspector
 
-56 tests across 6 suites. All tests run inside the VS Code extension host via `@vscode/test-cli` / `@vscode/test-electron` and target the compiled output at `out/test/**/*.test.js`.
+78 tests across 12 suites (the Copilot / Claude Code usage parsers — `extractCopilotSkillReads`, `parseCopilotChatSession`, `parseClaudeTranscriptLine` — are covered in `src/test/extension.test.ts` and not detailed below). All tests run inside the VS Code extension host via `@vscode/test-cli` / `@vscode/test-electron` and target the compiled output at `out/test/**/*.test.js`.
 
 ```
 npm run compile   # compile TypeScript first
@@ -40,13 +40,13 @@ All tested functions are pure (no VS Code API calls, no side-effects beyond the 
 
 ---
 
-### `parseMetadataBlockLocal` — 6 tests
+### `parseMetadataBlockLocal` — 8 tests
 
 `parseMetadataBlockLocal(rawFrontmatter)` locates the `metadata:` key in raw frontmatter YAML and returns one of four values:
 
 - `null` — no `metadata:` key found
 - `"scalar"` — `metadata:` has an inline value (e.g. `metadata: foo`)
-- `"list"` — the block contains YAML list items (`- item`)
+- `"list"` — the block's direct children are YAML list items (`- item`); lists nested deeper, under a sub-key, are values of the map
 - `Record<string, string>` — a map of sub-key → value
 
 | Test | What is verified |
@@ -54,6 +54,8 @@ All tested functions are pure (no VS Code API calls, no side-effects beyond the 
 | returns null when no metadata key is present | frontmatter without `metadata:` → `null` |
 | returns scalar when metadata has an inline value | `metadata: something` → `"scalar"` |
 | returns list when metadata contains a YAML list | `metadata:\n  - item` → `"list"` |
+| returns list for a sequence at the key indentation | `metadata:\n- item` → `"list"` |
+| treats nested lists inside the map as values, not as a list | sf-skills layout (`relatedSkills:` / `cliTools:` lists under the map) → Record with `version`, nested keys ignored |
 | returns a Record with parsed sub-keys | `version` and `author` keys are extracted correctly |
 | strips surrounding quotes from values | `"1.0"` and `'1.0'` are both returned as `1.0` |
 | stops reading at the next top-level key | keys after the indented metadata block are not included |
@@ -136,6 +138,29 @@ Each test creates a real temporary directory with `fs.mkdtempSync`, writes a `SK
 | copilot-hook-* returns hook description | `copilot-hook-events` | mentions "hook" or "lifecycle" |
 | workspace-settings returns settings description | `workspace-settings` | mentions "settings" |
 | unknown id returns an empty string | `completely-unknown-id-xyz` | returns `""` |
+
+---
+
+### `deleteTargetFor` — 3 tests
+
+`deleteTargetFor(filePath)` returns what the Checks-tab **delete** button removes: the whole skill folder for a `SKILL.md` inside a `skills/{name}/` folder, the file itself otherwise.
+
+| Test | What is verified |
+|---|---|
+| a skill SKILL.md resolves to its whole skill folder | `ws/.github/skills/platform-apex-generate/SKILL.md` → `ws/.github/skills/platform-apex-generate` |
+| a personal skill SKILL.md resolves to its skill folder | `~/.copilot/skills/my-skill/SKILL.md` → `~/.copilot/skills/my-skill` |
+| other files are deleted on their own | an `.instructions.md` file and a `SKILL.md` outside a `skills/` folder are returned unchanged |
+
+---
+
+### `CATEGORY_HELP` — 8 tests
+
+`CATEGORY_HELP` holds the content of the **Help** popup shown next to each Checks-tab category header.
+
+| Test | What is verified |
+|---|---|
+| covers every Checks-tab category | keys are exactly Instructions, Skills, Prompts, Agents, Copilot Hooks, Extensions, Settings |
+| `{category}`: has a summary and the required sections with content (×7) | non-empty summary; sections "When it is triggered", "Format", "Location", "Common use" and "What this tab checks" are present; no section is empty |
 
 ---
 

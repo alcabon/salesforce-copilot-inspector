@@ -24,7 +24,7 @@ Under **Assets**, click `salesforce-copilot-inspector-<version>.vsix` to downloa
 code --install-extension salesforce-copilot-inspector-<version>.vsix
 
 # concrete example
-code --install-extension salesforce-copilot-inspector-0.1.0.vsix
+code --install-extension salesforce-copilot-inspector-0.3.0.vsix
 ```
 
 Or via the VS Code UI: open the Extensions side-bar (`Ctrl+Shift+P` → **Extensions: Install from VSIX…**) and browse to the downloaded file.
@@ -42,7 +42,7 @@ Or via the VS Code UI: open the Extensions side-bar (`Ctrl+Shift+P` → **Extens
 
 ## Overview
 
-**Salesforce Copilot Inspector** gives you a live dashboard for everything Copilot-related in your workspace. Four sidebar tabs let you inspect what is configured, create new files from templates, manage personal files stored in your user profile, and configure the Salesforce DX MCP server. Two full editor panels handle the Salesforce Skills Library and skill spec validation.
+**Salesforce Copilot Inspector** gives you a live dashboard for everything Copilot-related in your workspace. Four sidebar tabs let you inspect what is configured, create new files from templates, manage personal files stored in your user profile, and configure the Salesforce DX MCP server. Full editor panels handle the Salesforce Skills Library, skill spec validation, and skill usage monitoring.
 
 ---
 
@@ -71,10 +71,24 @@ Each result shows a status indicator:
 
 A **workspace** or **personal** scope badge appears next to items so you know immediately which files are committed to the repository and which live in your user profile.
 
+**Help on each category:** click **Help** on a category header to open a popup that explains that kind of file:
+
+| Section | Content |
+|---|---|
+| When it is triggered | Always on, matched by glob, chosen by the agent, run by hand, or fired on an agent event |
+| Format | Markdown, Markdown with YAML frontmatter, JSON or JSONC, with the expected fields |
+| Location | Workspace and personal folders |
+| Common use | Typical Salesforce examples (Apex and LWC rules, test generation, blocking a production deploy…) |
+| Example | A short sample file |
+| Tips | Pitfalls and good practice |
+| What this tab checks | What the Inspector looks at and what makes a row ok, info or warn |
+
+Close the popup with **×**, **Esc** or a click outside it.
+
 **Actions available on each row:**
 
 - Click any row with a file path to open that file in the editor.
-- Click **delete** to remove a file (with a confirmation prompt).
+- Click **delete** to remove a file (with a confirmation prompt). For a skill, the whole skill folder is removed: `SKILL.md`, `references/` and `assets/`.
 - Click **check** on any skill to validate it against the agentskills.io spec and open the [Skill Validation Report](#skill-validation-report).
 - Click **↻** in the toolbar to re-run all checks.
 
@@ -205,11 +219,13 @@ A full editor panel that browses the [forcedotcom/sf-skills](https://github.com/
 
 - **Search** skills by name or description.
 - **Expand** any row to see the full description, reference files, and asset files.
-- **Install** a skill into `.github/skills/` (workspace) or `~/.copilot/skills/` (personal) with a single click.
+- **Install** a skill into `.github/skills/` (workspace) or `~/.copilot/skills/` (personal) with a single click. `SKILL.md` is installed with its `references/` and `assets/` folders; binary assets are copied byte-for-byte.
+- **Install Selected**: tick several skills (the header checkbox ticks the skills matching the current search) and install them in one batch. The install location is asked once; a cancellable progress notification shows each skill, and a summary reports what was installed. Failed skills stay ticked so you can retry.
 - **Check** validates a locally installed copy and shows the result inline in the detail row.
 - **✓ Validate Installed** runs all installed skills through the Skill Validation Report at once.
+- **↻ Refresh** reloads the list and re-reads the disk, so skills deleted since the last load lose their `✓ installed` badge.
 
-Installed skills are marked with a `✓ installed` badge and the Install button becomes **Reinstall**.
+Installed skills are marked with a `✓ installed` badge and the Install button becomes **Reinstall**. GitHub downloads time out after 20 seconds instead of hanging.
 
 ---
 
@@ -265,7 +281,7 @@ npm install
 npm run package
 ```
 
-This produces `salesforce-copilot-inspector-<version>.vsix` in the project root (e.g. `salesforce-copilot-inspector-0.0.1.vsix`).
+This produces `salesforce-copilot-inspector-<version>.vsix` in the project root (e.g. `salesforce-copilot-inspector-0.3.0.vsix`).
 
 ---
 
@@ -292,7 +308,7 @@ Three equivalent methods — pick whichever fits your workflow.
 code --install-extension salesforce-copilot-inspector-<version>.vsix
 
 # concrete example
-code --install-extension salesforce-copilot-inspector-0.0.1.vsix
+code --install-extension salesforce-copilot-inspector-0.3.0.vsix
 ```
 
 The `code` CLI is bundled with VS Code. On Windows it may need to be added to `PATH` via **Command Palette → Shell Command: Install 'code' command in PATH**.

@@ -113,28 +113,47 @@ export function getNonce(): string {
 	return nonce;
 }
 
-function fetchUrl(url: string, headers: Record<string, string> = {}): Promise<string> {
+const FETCH_TIMEOUT_MS = 20000;
+const FETCH_MAX_REDIRECTS = 5;
+
+/**
+ * GET a URL and return the raw bytes. Follows redirects (bounded) and aborts when
+ * the server stays silent for FETCH_TIMEOUT_MS, so a stalled connection can never
+ * leave a caller awaiting forever.
+ */
+function fetchBuffer(url: string, headers: Record<string, string> = {}, redirectsLeft = FETCH_MAX_REDIRECTS): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
 		const req = https.get(url, {
 			headers: { 'User-Agent': 'salesforce-copilot-inspector-vscode/1.0', ...headers },
 		}, (res) => {
-			if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307) && res.headers.location) {
-				resolve(fetchUrl(res.headers.location, headers));
+			const status = res.statusCode ?? 0;
+			if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
 				res.resume();
+				if (redirectsLeft <= 0) { reject(new Error(`Too many redirects: ${url}`)); return; }
+				const next = new URL(res.headers.location, url).toString();
+				fetchBuffer(next, headers, redirectsLeft - 1).then(resolve, reject);
 				return;
 			}
-			if (res.statusCode && res.statusCode >= 400) {
+			if (status >= 400) {
 				res.resume();
-				reject(new Error(`HTTP ${res.statusCode}`));
+				const rateLimited = status === 403 && res.headers['x-ratelimit-remaining'] === '0';
+				reject(new Error(rateLimited ? 'GitHub API rate limit reached — try again later' : `HTTP ${status}`));
 				return;
 			}
-			res.setEncoding('utf8');
-			let data = '';
-			res.on('data', (chunk: string) => { data += chunk; });
-			res.on('end', () => resolve(data));
+			const chunks: Buffer[] = [];
+			res.on('data', (chunk: Buffer) => chunks.push(chunk));
+			res.on('end', () => resolve(Buffer.concat(chunks)));
+			res.on('error', reject);
+		});
+		req.setTimeout(FETCH_TIMEOUT_MS, () => {
+			req.destroy(new Error(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s: ${url}`));
 		});
 		req.on('error', reject);
 	});
+}
+
+async function fetchUrl(url: string, headers: Record<string, string> = {}): Promise<string> {
+	return (await fetchBuffer(url, headers)).toString('utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -165,11 +184,25 @@ export function parseMetadataBlockLocal(rawFrontmatter: string): Record<string, 
 	const inlineValue = metaLine.slice(metaLine.indexOf(':') + 1).trim();
 	if (inlineValue && !inlineValue.startsWith('#')) { return 'scalar'; }
 	const result: Record<string, string> = {};
+	// Only the direct children of `metadata:` decide its shape. They all share the
+	// indentation of the first child; deeper lines are nested values (e.g. a
+	// `relatedSkills:` list inside the map) and must not turn the map into a list.
+	let childIndent = -1;
 	for (let i = metaIdx + 1; i < lines.length; i++) {
 		const line = lines[i];
-		if (!line.startsWith(' ') && !line.startsWith('\t')) { break; }
 		const trimmed = line.trim();
-		if (trimmed.startsWith('- ')) { return 'list'; }
+		if (!trimmed || trimmed.startsWith('#')) { continue; }
+		const indent = line.length - line.trimStart().length;
+		const isListItem = trimmed === '-' || trimmed.startsWith('- ');
+		if (childIndent === -1) {
+			// YAML allows a sequence under a key at the key's own indentation ("metadata:\n- a").
+			if (indent === 0 && isListItem) { return 'list'; }
+			if (indent === 0) { break; }
+			childIndent = indent;
+		}
+		if (indent < childIndent) { break; }
+		if (indent > childIndent) { continue; }
+		if (isListItem) { return 'list'; }
 		const colonIdx = trimmed.indexOf(':');
 		if (colonIdx === -1) { continue; }
 		const key = trimmed.slice(0, colonIdx).trim();
@@ -331,6 +364,18 @@ function findInstalledSkillPaths(skillName: string, workspaceRoot?: string): str
 	candidates.push(path.join(os.homedir(), '.claude', 'skills', skillName));
 	candidates.push(path.join(os.homedir(), '.agents', 'skills', skillName));
 	return candidates.filter(p => fileExists(path.join(p, 'SKILL.md')));
+}
+
+/**
+ * Returns what the Inspector's delete button should remove for a check path.
+ * A skill is a folder ({skills}/{name}/SKILL.md + references/ + assets/), so deleting
+ * a SKILL.md removes the whole skill folder; any other file is removed on its own.
+ */
+export function deleteTargetFor(filePath: string): string {
+	const skillDir = path.dirname(filePath);
+	const isSkillMd = path.basename(filePath) === 'SKILL.md'
+		&& path.basename(path.dirname(skillDir)) === 'skills';
+	return isSkillMd ? skillDir : filePath;
 }
 
 // ---------------------------------------------------------------------------
@@ -1465,7 +1510,10 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 				case 'deleteFile': {
 					const check = this._lastChecks[data.index as number];
 					if (!check?.path) { break; }
-					const label = path.basename(check.path);
+					const target = deleteTargetFor(check.path);
+					const label = target === check.path
+						? path.basename(target)
+						: `${path.basename(target)}/ (skill folder with SKILL.md, references/, assets/)`;
 					const answer = await vscode.window.showWarningMessage(
 						`Delete "${label}"? This cannot be undone.`,
 						{ modal: true },
@@ -1473,7 +1521,7 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 					);
 					if (answer === 'Delete') {
 						try {
-							fs.rmSync(check.path, { recursive: true, force: true });
+							fs.rmSync(target, { recursive: true, force: true });
 							await this._sendAll(webviewView.webview);
 						} catch (e) {
 							vscode.window.showErrorMessage(`Failed to delete: ${(e as Error).message}`);
@@ -2091,6 +2139,58 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       border-bottom: 1px solid var(--vscode-panel-border, #444);
       opacity: 0.85;
     }
+    #checks-root .cat-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .btn-help {
+      flex-shrink: 0; font-size: 11px; font-weight: 600; line-height: 1.4;
+      text-transform: none; letter-spacing: 0;
+      padding: 0 7px; border-radius: 3px; cursor: pointer;
+      border: 1px solid rgba(128,128,128,0.35); background: transparent;
+      color: var(--vscode-textLink-foreground);
+    }
+    .btn-help:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder, #007acc); }
+    .btn-help:focus-visible, .help-close:focus-visible { outline: 1px solid var(--vscode-focusBorder, #007acc); outline-offset: 1px; }
+    /* ── category help popup ──────────────────────────────── */
+    .help-overlay {
+      position: fixed; inset: 0; z-index: 100; display: none;
+      background: rgba(0,0,0,0.45); padding: 10px 8px; overflow-y: auto;
+    }
+    .help-overlay.open { display: block; }
+    .help-dialog {
+      max-width: 560px; margin: 0 auto; padding: 10px 12px 12px;
+      background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background, #252526));
+      color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+      border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, #454545));
+      border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    }
+    .help-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .help-title { margin: 0; font-size: 15px; font-weight: 700; }
+    .help-close {
+      flex-shrink: 0; background: none; border: none; cursor: pointer;
+      color: var(--vscode-icon-foreground, var(--vscode-foreground));
+      font-size: 18px; line-height: 1; padding: 0 4px; border-radius: 3px;
+    }
+    .help-close:hover { background: var(--vscode-toolbar-hoverBackground); }
+    .help-summary { margin: 6px 0 2px; font-size: 13px; line-height: 1.5; color: var(--vscode-descriptionForeground); }
+    .help-sec { margin-top: 10px; }
+    .help-sec h3 {
+      margin: 0 0 3px; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--vscode-textLink-foreground);
+    }
+    .help-sec p, .help-sec ul { margin: 0; font-size: 13px; line-height: 1.5; }
+    .help-sec ul { padding-left: 18px; }
+    .help-sec li + li { margin-top: 2px; }
+    .help-sec code {
+      font-family: var(--vscode-editor-font-family, monospace); font-size: 12px;
+      background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+      padding: 0 3px; border-radius: 3px; overflow-wrap: anywhere;
+    }
+    .help-sec pre {
+      margin: 0; padding: 6px 8px; overflow-x: auto; white-space: pre;
+      font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.45;
+      background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+      border-radius: 4px;
+    }
     /* ── check rows ───────────────────────────────────────── */
     .check {
       display: flex; align-items: flex-start;
@@ -2431,9 +2531,60 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
+  <!-- Category help popup (Checks tab) -->
+  <div class="help-overlay" id="helpOverlay">
+    <div class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+      <div class="help-head">
+        <h2 class="help-title" id="helpTitle"></h2>
+        <button class="help-close" id="helpClose" title="Close (Esc)" aria-label="Close help">×</button>
+      </div>
+      <div id="helpBody"></div>
+    </div>
+  </div>
+
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     let skillCheckCache = {};   // skillName -> { cls, lbl }
+    const CATEGORY_HELP = ${JSON.stringify(CATEGORY_HELP).replace(/</g, '\\u003c')};
+
+    // ── category help popup ───────────────────────────────
+    let _helpOpener = null;
+    function helpInline(s) {
+      return esc(s).replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+    }
+    function openHelp(cat, opener) {
+      const help = CATEGORY_HELP[cat];
+      if (!help) { return; }
+      _helpOpener = opener || null;
+      document.getElementById('helpTitle').textContent = cat;
+      let h = '<p class="help-summary">' + helpInline(help.summary) + '</p>';
+      for (const sec of help.sections) {
+        h += '<div class="help-sec"><h3>' + esc(sec.title) + '</h3>';
+        if (sec.text)  { h += '<p>' + helpInline(sec.text) + '</p>'; }
+        if (sec.items) { h += '<ul>' + sec.items.map(i => '<li>' + helpInline(i) + '</li>').join('') + '</ul>'; }
+        if (sec.code)  { h += '<pre><code>' + esc(sec.code) + '</code></pre>'; }
+        h += '</div>';
+      }
+      document.getElementById('helpBody').innerHTML = h;
+      const overlay = document.getElementById('helpOverlay');
+      overlay.classList.add('open');
+      overlay.scrollTop = 0;
+      document.getElementById('helpClose').focus();
+    }
+    function closeHelp() {
+      const overlay = document.getElementById('helpOverlay');
+      if (!overlay.classList.contains('open')) { return; }
+      overlay.classList.remove('open');
+      if (_helpOpener && document.body.contains(_helpOpener)) { _helpOpener.focus(); }
+      _helpOpener = null;
+    }
+    document.getElementById('helpClose').addEventListener('click', closeHelp);
+    document.getElementById('helpOverlay').addEventListener('click', e => {
+      if (e.target.id === 'helpOverlay') { closeHelp(); }
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { closeHelp(); }
+    });
 
     // ── summary button ────────────────────────────────────
     document.getElementById('btnSummary').addEventListener('click', () =>
@@ -2558,7 +2709,11 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
         cats[c.category].push(c);
       }
       for (const cat of order) {
-        html += '<div class="cat-header">' + esc(cat) + '</div>';
+        html += '<div class="cat-header"><span>' + esc(cat) + '</span>';
+        if (CATEGORY_HELP[cat]) {
+          html += '<button class="btn-help" data-cat="' + esc(cat) + '" title="What are ' + esc(cat) + '? When they apply, format, location, common use">Help</button>';
+        }
+        html += '</div>';
         for (const c of cats[cat]) {
           const idx = checks.indexOf(c);
           const isLink = !!c.path;
@@ -2598,6 +2753,9 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
           e.stopPropagation();
           vscode.postMessage({ type: 'deleteFile', index: parseInt(btn.dataset.idx, 10) });
         });
+      });
+      root.querySelectorAll('.btn-help').forEach(btn => {
+        btn.addEventListener('click', () => openHelp(btn.dataset.cat, btn));
       });
       root.querySelectorAll('.btn-check').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -3053,7 +3211,8 @@ class SfSkillsPanel {
 			switch (msg.type) {
 				case 'getSkillsList':    await this._sendSkillsList(); break;
 				case 'getSkillDetail':  await this._sendSkillDetail(msg.skillName as string); break;
-				case 'installSkill':    await this._installSkill(msg.skillName as string); break;
+				case 'installSkill':    await this._installSkills([msg.skillName as string]); break;
+				case 'installSkills':   await this._installSkills(msg.skillNames as string[]); break;
 				case 'openGitHub':
 					await vscode.env.openExternal(vscode.Uri.parse(msg.url as string));
 					break;
@@ -3164,71 +3323,110 @@ class SfSkillsPanel {
 		}
 	}
 
-	private async _installSkill(skillName: string) {
-		const location = await vscode.window.showQuickPick([
-			{ label: '$(root-folder) Project', description: '.github/skills/  — team-shared in repository', value: 'project' as const },
-			{ label: '$(home) Personal',        description: '~/.copilot/skills/  — available in every workspace', value: 'personal' as const },
-		], { title: `Where to install "${skillName}"?`, placeHolder: 'Choose installation location' });
-		if (!location) {
-			this._panel.webview.postMessage({ type: 'installResult', skillName, success: false, message: 'Cancelled.' });
-			return;
-		}
+	private _installBusy = false;
 
-		const targetDir = location.value === 'personal'
-			? path.join(os.homedir(), '.copilot', 'skills', skillName)
-			: this._workspaceRoot
-				? path.join(this._workspaceRoot, '.github', 'skills', skillName)
-				: null;
-
-		if (!targetDir) {
-			this._panel.webview.postMessage({ type: 'installResult', skillName, success: false, message: 'No workspace folder open (required for project install).' });
-			return;
-		}
+	/**
+	 * Installs one or more skills. The location is asked once for the whole batch,
+	 * then the skills are downloaded one after another behind a cancellable progress
+	 * notification. Every requested skill always gets exactly one `installResult`, and
+	 * the batch always ends with `installBatchDone`, so the webview can never be left
+	 * waiting on a skill that will not answer.
+	 */
+	private async _installSkills(skillNames: string[]) {
+		const names = [...new Set((skillNames ?? []).filter(n => typeof n === 'string' && n))];
+		const post = (m: Record<string, unknown>) => { void this._panel.webview.postMessage(m); };
+		const failAll = (message: string) => {
+			for (const skillName of names) { post({ type: 'installResult', skillName, success: false, message }); }
+			post({ type: 'installBatchDone' });
+		};
+		if (!names.length) { post({ type: 'installBatchDone' }); return; }
+		if (this._installBusy) { failAll('Another installation is already running.'); return; }
+		this._installBusy = true;
 
 		try {
-			const content = await fetchUrl(
-				`https://raw.githubusercontent.com/forcedotcom/sf-skills/main/skills/${skillName}/SKILL.md`
-			);
-			// Skills go in {location}/{name}/SKILL.md — preserve the original SKILL.md content as-is.
-			const targetPath = path.join(targetDir, 'SKILL.md');
-			fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-			fs.writeFileSync(targetPath, content, 'utf8');
+			const what = names.length === 1 ? `"${names[0]}"` : `${names.length} skills`;
+			const location = await vscode.window.showQuickPick([
+				{ label: '$(root-folder) Project', description: '.github/skills/  — team-shared in repository', value: 'project' as const },
+				{ label: '$(home) Personal',        description: '~/.copilot/skills/  — available in every workspace', value: 'personal' as const },
+			], { title: `Where to install ${what}?`, placeHolder: 'Choose installation location', ignoreFocusOut: true });
+			if (!location) { failAll('Cancelled.'); return; }
 
-			// Also install references/ and assets/ subdirectories when present.
-			try {
-				const dirJson = await fetchUrl(
-					`https://api.github.com/repos/forcedotcom/sf-skills/contents/skills/${skillName}`,
-					{ 'Accept': 'application/vnd.github.v3+json' },
-				);
-				const dirItems = JSON.parse(dirJson) as Array<{ name: string; type: string }>;
-				for (const sub of ['references', 'assets'] as const) {
-					if (!dirItems.some(i => i.name === sub && i.type === 'dir')) { continue; }
-					const subJson = await fetchUrl(
-						`https://api.github.com/repos/forcedotcom/sf-skills/contents/skills/${skillName}/${sub}`,
-						{ 'Accept': 'application/vnd.github.v3+json' },
-					);
-					const subItems = JSON.parse(subJson) as Array<{ name: string; type: string; download_url: string | null }>;
-					for (const item of subItems.filter(i => i.type === 'file' && i.download_url)) {
-						const fileContent = await fetchUrl(item.download_url!);
-						const filePath = path.join(targetDir, sub, item.name);
-						fs.mkdirSync(path.dirname(filePath), { recursive: true });
-						fs.writeFileSync(filePath, fileContent, 'utf8');
+			const baseDir = location.value === 'personal'
+				? path.join(os.homedir(), '.copilot', 'skills')
+				: this._workspaceRoot ? path.join(this._workspaceRoot, '.github', 'skills') : null;
+			if (!baseDir) { failAll('No workspace folder open (required for project install).'); return; }
+
+			await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: names.length === 1 ? `Installing ${names[0]}` : `Installing ${names.length} Salesforce skills`,
+				cancellable: true,
+			}, async (progress, token) => {
+				let ok = 0;
+				for (let i = 0; i < names.length; i++) {
+					const skillName = names[i];
+					if (token.isCancellationRequested) {
+						post({ type: 'installResult', skillName, success: false, message: 'Cancelled.' });
+						continue;
+					}
+					progress.report({ message: `${i + 1}/${names.length} — ${skillName}`, increment: i === 0 ? 0 : 100 / names.length });
+					post({ type: 'installStarted', skillName, index: i + 1, total: names.length });
+					try {
+						const { targetPath, warning } = await this._downloadSkill(skillName, path.join(baseDir, skillName), token);
+						const filePath = location.value === 'personal'
+							? `~/.copilot/skills/${skillName}/SKILL.md`
+							: path.relative(this._workspaceRoot!, targetPath);
+						post({ type: 'installResult', skillName, success: true, filePath, warning });
+						ok++;
+					} catch (e) {
+						post({ type: 'installResult', skillName, success: false, message: e instanceof Error ? e.message : String(e) });
 					}
 				}
-			} catch {
-				// references/assets are optional — SKILL.md is already saved
-			}
-
-			const displayPath = location.value === 'personal'
-				? `~/.copilot/skills/${skillName}/SKILL.md`
-				: path.relative(this._workspaceRoot!, targetPath);
-			this._panel.webview.postMessage({
-				type: 'installResult', skillName, success: true,
-				filePath: displayPath,
+				if (names.length > 1) {
+					const failed = names.length - ok;
+					const msg = `Salesforce skills: ${ok} installed${failed ? `, ${failed} failed or cancelled` : ''}.`;
+					if (failed) { void vscode.window.showWarningMessage(msg); } else { void vscode.window.showInformationMessage(msg); }
+				}
 			});
+			post({ type: 'installBatchDone' });
 		} catch (e) {
-			this._panel.webview.postMessage({ type: 'installResult', skillName, success: false, message: String(e) });
+			failAll(e instanceof Error ? e.message : String(e));
+		} finally {
+			this._installBusy = false;
 		}
+	}
+
+	/** Downloads SKILL.md plus its references/ and assets/ into targetDir. */
+	private async _downloadSkill(skillName: string, targetDir: string, token: vscode.CancellationToken): Promise<{ targetPath: string; warning?: string }> {
+		const raw = `https://raw.githubusercontent.com/forcedotcom/sf-skills/main/skills/${encodeURIComponent(skillName)}`;
+		const api = `https://api.github.com/repos/forcedotcom/sf-skills/contents/skills/${encodeURIComponent(skillName)}`;
+		const apiHeaders = { 'Accept': 'application/vnd.github.v3+json' };
+
+		// Skills go in {location}/{name}/SKILL.md — preserve the original SKILL.md content as-is.
+		const content = await fetchBuffer(`${raw}/SKILL.md`);
+		const targetPath = path.join(targetDir, 'SKILL.md');
+		await fs.promises.mkdir(targetDir, { recursive: true });
+		await fs.promises.writeFile(targetPath, content);
+
+		// references/ and assets/ are optional: a failure there keeps SKILL.md and is reported as a warning.
+		try {
+			const dirItems = JSON.parse(await fetchUrl(api, apiHeaders)) as Array<{ name: string; type: string }>;
+			for (const sub of ['references', 'assets'] as const) {
+				if (!dirItems.some(i => i.name === sub && i.type === 'dir')) { continue; }
+				const subItems = JSON.parse(await fetchUrl(`${api}/${sub}`, apiHeaders)) as Array<{ name: string; type: string; download_url: string | null }>;
+				const files = subItems.filter(i => i.type === 'file' && i.download_url);
+				if (!files.length) { continue; }
+				await fs.promises.mkdir(path.join(targetDir, sub), { recursive: true });
+				for (const item of files) {
+					if (token.isCancellationRequested) { return { targetPath, warning: 'Cancelled before all references/assets were downloaded.' }; }
+					// Written as raw bytes so binary assets (images, zips) are not corrupted.
+					const bytes = await fetchBuffer(item.download_url!);
+					await fs.promises.writeFile(path.join(targetDir, sub, path.basename(item.name)), bytes);
+				}
+			}
+		} catch (e) {
+			return { targetPath, warning: `SKILL.md installed, but references/assets could not be downloaded: ${e instanceof Error ? e.message : String(e)}` };
+		}
+		return { targetPath };
 	}
 
 	public dispose() {
@@ -3467,8 +3665,8 @@ class SfSkillsPanel {
     let checkCache = {};   // skillName -> { status, errors, warnings }
     let selectedSet = new Set();   // skill names ticked for bulk install (survives filtering/re-render)
     let shownSkills = [];          // skills currently rendered (after search filter)
-    let bulkQueue = [];            // remaining skill names in a running "Install Selected" batch
-    let bulkTotal = 0;
+    let pendingSet = new Set();    // skills sent to the host and still awaiting their installResult
+    let bulkRunning = false;       // an "Install Selected" batch is in progress
     let colWidths = [22, 20, 190, null, 120, 185];   // px per <th>, null = flexible
 
     document.getElementById('sfLinkGH').addEventListener('click', () =>
@@ -3493,7 +3691,11 @@ class SfSkillsPanel {
       switch (data.type) {
         case 'skillsList':
           allSkills = data.skills;
-          for (const s of allSkills) { if (s.isInstalled) { installedSet.add(s.name); } }
+          // Rebuild from disk state so skills deleted since the last load drop their "installed" state.
+          installedSet = new Set(allSkills.filter(s => s.isInstalled).map(s => s.name));
+          for (const name of Object.keys(checkCache)) {
+            if (!installedSet.has(name)) { delete checkCache[name]; }
+          }
           renderTable(allSkills);
           break;
         case 'skillDetail':
@@ -3506,8 +3708,15 @@ class SfSkillsPanel {
         case 'checkResult':
           handleCheckResult(data);
           break;
+        case 'installStarted':
+          handleInstallStarted(data);
+          break;
         case 'installResult':
           handleInstallResult(data);
+          break;
+        case 'installBatchDone':
+          bulkRunning = false;
+          updateSelectionUi();
           break;
         case 'error':
           document.getElementById('sfContent').innerHTML =
@@ -3573,7 +3782,9 @@ class SfSkillsPanel {
         if (isIns)  html += '<span class="sf-badge sf-badge-ok">✓ installed</span>';
         html += '</td>';
         html += '<td class="sf-actions">';
-        html += '<button class="sf-btn-install' + (isIns ? ' installed' : '') + '" data-skill="' + esc(s.name) + '">' + (isIns ? 'Reinstall' : 'Install') + '</button>';
+        const isPending = pendingSet.has(s.name);
+        html += '<button class="sf-btn-install' + (isIns ? ' installed' : '') + '" data-skill="' + esc(s.name) + '"' + (isPending ? ' disabled' : '') + '>' +
+                (isPending ? 'Installing…' : isIns ? 'Reinstall' : 'Install') + '</button>';
         const chkData = checkCache[s.name];
         const chkCls  = chkData ? ' ' + chkData.status : '';
         const chkLbl  = chkData ? (chkData.status === 'ok' ? '✓' : chkData.status === 'warn' ? '⚠' : chkData.status === 'error' ? '✗' : '…') + ' Check' : 'Check';
@@ -3663,7 +3874,7 @@ class SfSkillsPanel {
       }
 
       const btn = document.getElementById('sfInstallSelected');
-      if (btn && !bulkQueue.length) {
+      if (btn && !bulkRunning) {
         const n = selectedSet.size;
         btn.disabled = n === 0;
         btn.textContent = n ? '⬇ Install Selected (' + n + ')' : '⬇ Install Selected';
@@ -3672,32 +3883,36 @@ class SfSkillsPanel {
       }
     }
 
+    // The whole selection goes to the host in ONE message: the host asks for the
+    // install location once and then downloads the skills sequentially, answering
+    // with installStarted / installResult per skill and installBatchDone at the end.
     function installSelected() {
-      if (bulkQueue.length) { return; }          // a batch is already running
+      if (bulkRunning) { return; }
       const names = [...selectedSet];
       if (!names.length) { return; }
-      bulkQueue = names;
-      bulkTotal = names.length;
+      bulkRunning = true;
       const btn = document.getElementById('sfInstallSelected');
       btn.disabled = true;
-      // Install one at a time: the host handles a single skill per message, and
-      // handleInstallResult() drives the queue forward as each one comes back.
-      installNextInBatch();
+      btn.textContent = '⬇ Waiting for location…';
+      for (const name of names) {
+        pendingSet.add(name);
+        const rowBtn = rowInstallBtn(name);
+        if (rowBtn) { rowBtn.disabled = true; rowBtn.textContent = 'Queued…'; }
+      }
+      vscode.postMessage({ type: 'installSkills', skillNames: names });
     }
 
-    function installNextInBatch() {
-      const btn = document.getElementById('sfInstallSelected');
-      if (!bulkQueue.length) {
-        bulkTotal = 0;
-        updateSelectionUi();
-        return;
-      }
-      const done = bulkTotal - bulkQueue.length + 1;
-      btn.textContent = '⬇ Installing ' + done + '/' + bulkTotal + '…';
-      const name = bulkQueue[0];
-      const rowBtn = document.querySelector('.sf-btn-install[data-skill="' + name + '"]');
+    function rowInstallBtn(name) {
+      return document.querySelector('.sf-btn-install[data-skill="' + CSS.escape(name) + '"]');
+    }
+
+    function handleInstallStarted(data) {
+      const rowBtn = rowInstallBtn(data.skillName);
       if (rowBtn) { rowBtn.disabled = true; rowBtn.textContent = 'Installing…'; }
-      vscode.postMessage({ type: 'installSkill', skillName: name });
+      if (bulkRunning && data.total > 1) {
+        const btn = document.getElementById('sfInstallSelected');
+        btn.textContent = '⬇ Installing ' + data.index + '/' + data.total + '…';
+      }
     }
 
     function attachColResize(cnt) {
@@ -3816,21 +4031,32 @@ class SfSkillsPanel {
 
     function installSkill(skillName, btn) {
       btn.disabled = true; btn.textContent = 'Installing…';
+      pendingSet.add(skillName);
       vscode.postMessage({ type: 'installSkill', skillName });
     }
 
     function handleInstallResult(data) {
-      if (bulkQueue.length && bulkQueue[0] === data.skillName) {
-        bulkQueue.shift();
-        setTimeout(installNextInBatch, 0);
+      pendingSet.delete(data.skillName);
+      if (data.success) {
+        installedSet.add(data.skillName);
+        // Installed skills drop out of the selection; failed ones stay ticked for a retry.
+        if (selectedSet.delete(data.skillName)) {
+          const cb = document.querySelector('.sf-check-row[data-skill="' + CSS.escape(data.skillName) + '"]');
+          if (cb) { cb.checked = false; }
+          updateSelectionUi();
+        }
       }
-      const btn = document.querySelector('.sf-btn-install[data-skill="' + data.skillName + '"]');
+      const btn = rowInstallBtn(data.skillName);
       if (btn) {
         btn.disabled = false;
         if (data.success) {
-          installedSet.add(data.skillName);
           btn.classList.add('installed');
           btn.textContent = 'Reinstall';
+          if (data.warning) {
+            btn.title = data.warning;
+            btn.style.outline = '1px solid var(--vscode-editorWarning-foreground, #cca700)';
+            setTimeout(() => { btn.style.outline = ''; }, 5000);
+          }
           // Enable the Check button — while disabled, Electron routes clicks to the parent TD,
           // bypassing the row-click guard and accidentally toggling the detail chevron.
           const checkBtn = document.querySelector('.sf-btn-check[data-skill="' + data.skillName + '"]');
@@ -4402,6 +4628,216 @@ class SkillValidationReportPanel {
 </html>`;
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Category help — content of the "Help" popup next to each Checks-tab header
+// ---------------------------------------------------------------------------
+
+/** One section of a category help popup. `text`/`items` may contain `inline code` in backticks. */
+export interface HelpSection {
+	title: string;
+	text?: string;
+	items?: string[];
+	code?: string;
+}
+
+export interface CategoryHelp {
+	summary: string;
+	sections: HelpSection[];
+}
+
+/** Help popup content, keyed by the CheckResult category shown in the Checks tab. */
+export const CATEGORY_HELP: Record<string, CategoryHelp> = {
+	'Instructions': {
+		summary: 'Standing rules Copilot adds to chat requests: coding conventions, project context and Salesforce standards you would otherwise repeat in every prompt.',
+		sections: [
+			{ title: 'When it is triggered', items: [
+				'`.github/copilot-instructions.md` is added automatically to every chat request in this workspace (Ask, Edit and Agent).',
+				'`*.instructions.md` files are added automatically when a file in the chat context matches their `applyTo` glob.',
+				'Any instructions file can also be attached by hand: Add Context → Instructions.',
+			] },
+			{ title: 'Format', items: [
+				'`copilot-instructions.md`: plain Markdown, no frontmatter.',
+				'`*.instructions.md`: Markdown with optional YAML frontmatter: `applyTo` (glob, comma-separated) and `description`.',
+			] },
+			{ title: 'Location', items: [
+				'Workspace-wide: `.github/copilot-instructions.md`.',
+				'Scoped: `.github/instructions/*.instructions.md` (more folders can be added with the `chat.instructionsFilesLocations` setting).',
+				'Personal: the `prompts` folder of your VS Code user profile.',
+			] },
+			{ title: 'Common use', items: [
+				'Apex conventions: bulkification, no SOQL/DML in loops, `with sharing`, test class naming.',
+				'LWC rules (`**/lwc/**`): SLDS usage, wire vs imperative Apex, Jest tests.',
+				'Project facts Copilot cannot guess: org shape, namespace, API version, deployment flow.',
+			] },
+			{ title: 'Example', code: '---\napplyTo: "**/*.cls,**/*.trigger"\ndescription: Apex coding standards\n---\n- Bulkify every trigger handler; never put SOQL or DML inside a loop.\n- Declare classes `with sharing` unless a comment explains why not.\n- Every class needs a matching *Test class with at least 85% coverage.' },
+			{ title: 'Tips', items: [
+				'Keep rules short and imperative: they are sent with every matching request and use context.',
+				'Put language- or folder-specific rules in scoped `*.instructions.md` files instead of one large file.',
+				'Copilot\'s documented location is `.github/copilot-instructions.md`; prefer it over a root-level copy.',
+			] },
+			{ title: 'What this tab checks', text: 'Whether `.github/copilot-instructions.md` exists (shown as missing if not), a root-level `copilot-instructions.md`, and every `*.instructions.md` file in the workspace.' },
+		],
+	},
+	'Skills': {
+		summary: 'Folders of instructions, scripts and resources that the agent loads on demand when a task matches the skill (Agent Skills open standard, agentskills.io).',
+		sections: [
+			{ title: 'When it is triggered', items: [
+				'Automatically, in Agent mode: the agent always sees each skill\'s `name` and `description`, and reads the full `SKILL.md` only when your request matches the description.',
+				'Files in `references/`, `assets/` or `scripts/` are read only when the `SKILL.md` body points to them (progressive disclosure).',
+				'By hand: type `/skill-name` in chat to invoke a skill directly.',
+			] },
+			{ title: 'Format', items: [
+				'A folder `{skill-name}/` containing `SKILL.md`: Markdown with YAML frontmatter.',
+				'Required frontmatter: `name` (lowercase, hyphens, same as the folder name) and `description` (what the skill does and when to use it, at most 1024 characters).',
+				'Optional: `license`, `metadata` (key-value map), `allowed-tools`, `compatibility`.',
+				'Optional subfolders: `references/` (docs), `assets/` (templates, sample code), `scripts/` (executables).',
+			] },
+			{ title: 'Location', items: [
+				'Workspace: `.github/skills/`, `.claude/skills/` or `.agents/skills/` (shared with the team through Git).',
+				'Personal: `~/.copilot/skills/`, `~/.claude/skills/` or `~/.agents/skills/` (available in every workspace).',
+			] },
+			{ title: 'Common use', items: [
+				'Repeatable Salesforce workflows: generating Apex classes from templates, writing and running Apex tests, analysing debug logs.',
+				'Bundling templates and reference docs that would be too large for always-on instructions.',
+				'Sharing a team procedure that both GitHub Copilot and Claude Code can use (same format).',
+			] },
+			{ title: 'Example', code: '---\nname: apex-test-generate\ndescription: "Generates Apex test classes with test data factories. Use this skill when the user asks for unit tests or more coverage on an Apex class."\nmetadata:\n  version: "1.0"\n---\n# Apex test generation\n1. Read the class under test.\n2. Use the factory in assets/TestDataFactory.cls ...' },
+			{ title: 'Tips', items: [
+				'The `description` decides when the skill fires: say what it does and include trigger phrases ("Use this skill when…").',
+				'Keep `SKILL.md` under about 500 lines; move details into `references/`.',
+				'Deleting a skill here removes its whole folder (`SKILL.md`, `references/`, `assets/`).',
+			] },
+			{ title: 'What this tab checks', text: 'Every `SKILL.md` in the workspace and personal skill folders. The check button validates it against the spec; this extension also requires `metadata.version` in `x.y` format.' },
+		],
+	},
+	'Prompts': {
+		summary: 'Reusable prompt templates you run on demand as slash commands, for tasks you repeat often.',
+		sections: [
+			{ title: 'When it is triggered', items: [
+				'Only when you run it: type `/prompt-name` in Copilot Chat, use the Chat: Run Prompt command, or press the run button in the editor title of an open `.prompt.md`.',
+				'It never runs automatically.',
+			] },
+			{ title: 'Format', items: [
+				'File name `{name}.prompt.md`: Markdown body with optional YAML frontmatter.',
+				'Frontmatter: `description`, `agent` (ask, edit, agent or a custom agent; formerly `mode`), `model`, `tools`, `argument-hint`.',
+				'Variables in the body: `${selection}`, `${file}`, `${workspaceFolder}`, `${input:name}` (asks for a value).',
+			] },
+			{ title: 'Location', items: [
+				'Workspace: `.github/prompts/` (more folders with the `chat.promptFilesLocations` setting).',
+				'Personal: the `prompts` folder of your VS Code user profile.',
+			] },
+			{ title: 'Common use', items: [
+				'"Create an LWC with Jest test", "Write a trigger handler for ${input:object}".',
+				'Code review checklists, release notes, SOQL optimisation of the current selection.',
+			] },
+			{ title: 'Example', code: '---\ndescription: Generate a trigger handler\nagent: agent\nargument-hint: sObject API name\n---\nCreate a trigger and a handler class for ${input:object}\nfollowing the project trigger framework. Add a test class.' },
+			{ title: 'Tips', items: [
+				'Prompts are for tasks you start yourself; use Skills when the agent should decide to use them.',
+				'Reference instructions or files with Markdown links instead of copying their content.',
+			] },
+			{ title: 'What this tab checks', text: 'Every `*.prompt.md` file in the workspace.' },
+		],
+	},
+	'Agents': {
+		summary: 'Custom agents give Copilot a persona: a role, its own instructions, a restricted tool set and optionally a model. AGENTS.md gives every coding agent the same project guide.',
+		sections: [
+			{ title: 'When it is triggered', items: [
+				'`*.agent.md`: when you pick the agent in the agent dropdown of the Chat view. It stays active for the conversation; agents can hand off to each other.',
+				'`AGENTS.md`: added automatically to chat requests as instructions (setting `chat.useAgentsMdFile`); also read by other coding agents.',
+			] },
+			{ title: 'Format', items: [
+				'`{name}.agent.md`: Markdown body (the agent\'s instructions) with YAML frontmatter: `description`, `tools`, `model`, `handoffs`, `argument-hint`.',
+				'`AGENTS.md`: plain Markdown, no frontmatter.',
+				'Custom agents were previously called chat modes (`*.chatmode.md`).',
+			] },
+			{ title: 'Location', items: [
+				'Workspace: `.github/agents/*.agent.md`.',
+				'Personal: your VS Code user profile.',
+				'`AGENTS.md`: workspace root.',
+			] },
+			{ title: 'Common use', items: [
+				'A read-only "Planner" or "Reviewer" agent limited to search tools.',
+				'A "Salesforce Deployer" agent with the Salesforce MCP tools and deployment rules.',
+				'`AGENTS.md`: build, test and deploy commands that Copilot, Claude Code and other agents should all follow.',
+			] },
+			{ title: 'Example', code: '---\ndescription: Reviews Apex for governor-limit and security issues\ntools: [\'search\', \'usages\', \'problems\']\n---\nYou are a Salesforce code reviewer. Do not edit files.\nReport SOQL/DML in loops, missing sharing, and CRUD/FLS gaps.' },
+			{ title: 'Tips', items: [
+				'Limit `tools` to what the agent really needs: fewer tools means more predictable behaviour.',
+				'Use `AGENTS.md` for facts every agent needs; use `.agent.md` files for specialised roles.',
+			] },
+			{ title: 'What this tab checks', text: 'Every `*.agent.md` file in the workspace and whether `AGENTS.md` exists at the workspace root.' },
+		],
+	},
+	'Copilot Hooks': {
+		summary: 'Shell commands that run automatically at fixed points of an agent session. Unlike instructions, hooks always run: the model cannot skip them.',
+		sections: [
+			{ title: 'When it is triggered', items: [
+				'Automatically, on agent lifecycle events: session start and end, prompt submitted, before a tool runs, after a tool runs, on error.',
+				'Event names: `sessionStart`, `userPromptSubmitted`, `preToolUse`, `postToolUse`, `sessionEnd`, `errorOccurred` (Copilot format); `PreToolUse`, `PostToolUse`… (Claude format).',
+				'A pre-tool hook can block the tool call.',
+			] },
+			{ title: 'Format', items: [
+				'JSON. Copilot: `{ "version": 1, "hooks": { "<event>": [ { "type": "command", "bash": "…", "powershell": "…" } ] } }`.',
+				'Claude format: a `hooks` object in `.claude/settings.json`.',
+				'The command receives the event details as JSON on standard input.',
+			] },
+			{ title: 'Location', items: [
+				'`.github/hooks/*.json` (GitHub Copilot).',
+				'`.claude/settings.json` (shared) and `.claude/settings.local.json` (personal, not committed).',
+			] },
+			{ title: 'Common use', items: [
+				'Block dangerous commands, e.g. deploying to a production org or `sf org delete`.',
+				'Run Prettier or the Apex/LWC linters after each file edit.',
+				'Audit logging of tool calls; adding context at session start.',
+			] },
+			{ title: 'Example', code: '{\n  "version": 1,\n  "hooks": {\n    "preToolUse": [\n      {\n        "type": "command",\n        "bash": "./scripts/block-prod-deploy.sh",\n        "powershell": "./scripts/block-prod-deploy.ps1",\n        "timeoutSec": 10\n      }\n    ]\n  }\n}' },
+			{ title: 'Tips', items: [
+				'Hooks run with your user permissions: review hook scripts before committing or accepting them.',
+				'Keep them fast; a slow hook delays every matching tool call.',
+			] },
+			{ title: 'What this tab checks', text: 'Parses each hook file: ok when at least one event has commands, info when events are defined but empty, warning when the JSON is invalid.' },
+		],
+	},
+	'Extensions': {
+		summary: 'The VS Code extensions that provide Copilot itself. Every other category on this tab depends on them.',
+		sections: [
+			{ title: 'When it is triggered', text: 'Loaded when VS Code starts. Chat, agent mode and inline suggestions are available once you sign in with a GitHub account that has a Copilot plan.' },
+			{ title: 'Format', text: 'VS Code extensions from the Marketplace: GitHub Copilot Chat (`GitHub.copilot-chat`). The older GitHub Copilot extension (`GitHub.copilot`) is deprecated.' },
+			{ title: 'Location', text: 'Your VS Code extensions folder (`~/.vscode/extensions/`); recent VS Code versions also ship Copilot support built in.' },
+			{ title: 'Common use', items: [
+				'GitHub Copilot Chat: chat, agent mode, inline suggestions, slash commands, and loading of instructions, prompts, agents and skills.',
+			] },
+			{ title: 'Tips', items: [
+				'If instructions, prompts or skills are ignored, check first that Copilot Chat is installed, enabled and up to date.',
+				'The deprecated GitHub Copilot extension can be uninstalled once Copilot Chat is installed.',
+			] },
+			{ title: 'What this tab checks', text: 'Whether GitHub Copilot Chat is installed (warning if not) and whether the deprecated GitHub Copilot extension is still installed (warning if it is).' },
+		],
+	},
+	'Settings': {
+		summary: 'Workspace settings that turn Copilot features on or off and tell it where to find your customisation files.',
+		sections: [
+			{ title: 'When it is triggered', text: 'Read when the workspace opens and applied live when the file changes. Workspace settings override your user settings for this project.' },
+			{ title: 'Format', text: 'JSON with comments (JSONC): a flat object of `"setting.id": value` pairs.' },
+			{ title: 'Location', items: [
+				'Workspace: `.vscode/settings.json` (shared through Git).',
+				'User settings (all workspaces): Preferences: Open User Settings (JSON).',
+			] },
+			{ title: 'Common use', items: [
+				'`github.copilot.enable`: turn inline suggestions on or off per language.',
+				'`github.copilot.chat.codeGeneration.useInstructionFiles`: use `.github/copilot-instructions.md`.',
+				'`chat.instructionsFilesLocations`, `chat.promptFilesLocations`: extra folders for instructions and prompts.',
+				'`chat.useAgentsMdFile`: use `AGENTS.md` as instructions.',
+			] },
+			{ title: 'Example', code: '{\n  "github.copilot.enable": { "*": true, "plaintext": false },\n  "github.copilot.chat.codeGeneration.useInstructionFiles": true,\n  "chat.promptFilesLocations": { ".github/prompts": true }\n}' },
+			{ title: 'Tips', items: [
+				'Commit only settings the whole team should share; keep personal preferences in user settings.',
+			] },
+			{ title: 'What this tab checks', text: 'Whether `.vscode/settings.json` exists, parses, and contains keys starting with `github.copilot` or `copilot`. Keys starting with `chat.` are not counted.' },
+		],
+	},
+};
 
 // ---------------------------------------------------------------------------
 // SummaryPanel — editor-area panel summarising all installed Copilot files
