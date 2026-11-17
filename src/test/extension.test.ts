@@ -16,6 +16,10 @@ import {
 	parseClaudeTranscriptLine,
 	deleteTargetFor,
 	CATEGORY_HELP,
+	readSfdxProjectInfo,
+	getProjectInitFiles,
+	previewProjectInit,
+	createProjectInitFiles,
 	type CheckResult,
 } from '../extension';
 
@@ -683,4 +687,71 @@ suite('CATEGORY_HELP', () => {
 			}
 		});
 	}
+});
+
+// ---------------------------------------------------------------------------
+// Initialize Project Configuration
+// ---------------------------------------------------------------------------
+
+suite('Initialize Project Configuration', () => {
+	let root: string;
+	setup(() => { root = makeTempDir(); });
+	teardown(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+	test('readSfdxProjectInfo reads the API version and the default package directory', () => {
+		fs.writeFileSync(path.join(root, 'sfdx-project.json'), JSON.stringify({
+			sourceApiVersion: '64.0',
+			packageDirectories: [{ path: 'other' }, { path: 'src-app/', default: true }],
+		}));
+		assert.deepStrictEqual(readSfdxProjectInfo(root), { isSfdxProject: true, apiVersion: '64.0', packageDir: 'src-app' });
+	});
+
+	test('readSfdxProjectInfo reports a non-SFDX folder', () => {
+		assert.deepStrictEqual(readSfdxProjectInfo(root), { isSfdxProject: false });
+	});
+
+	test('files have unique relative paths, no skills, and the project values', () => {
+		const files = getProjectInitFiles({ isSfdxProject: true, apiVersion: '64.0', packageDir: 'src-app' });
+		const paths = files.map(f => f.path);
+		assert.strictEqual(new Set(paths).size, paths.length, 'duplicate paths');
+		for (const p of paths) {
+			assert.ok(!p.startsWith('/') && !p.includes('..') && !p.includes('\\'), `unsafe path ${p}`);
+			assert.ok(!p.includes('/skills/'), `skills must not be generated: ${p}`);
+		}
+		const agents = files.find(f => f.path === 'AGENTS.md')!.content;
+		assert.ok(agents.includes('API version 64.0') && agents.includes('`src-app/`'));
+		const prompt = files.find(f => f.path === '.github/prompts/new-trigger.prompt.md')!.content;
+		assert.ok(prompt.includes('${input:sobject:sObject API name}') && prompt.includes('src-app/main/default/triggers/'));
+	});
+
+	test('JSON files parse and the hook points to generated scripts', () => {
+		const files = getProjectInitFiles({ isSfdxProject: false });
+		for (const f of files.filter(x => x.path.endsWith('.json') && x.path !== '.vscode/settings.json')) {
+			assert.doesNotThrow(() => JSON.parse(f.content), f.path);
+		}
+		const guard = JSON.parse(files.find(f => f.path === '.github/hooks/guard.json')!.content);
+		const cmd = guard.hooks.preToolUse[0];
+		for (const script of ['.github/hooks/scripts/block-prod-deploy.sh', '.github/hooks/scripts/block-prod-deploy.ps1']) {
+			assert.ok(`${cmd.bash} ${cmd.powershell}`.includes(script), script);
+			assert.ok(files.some(f => f.path === script), `${script} is generated`);
+		}
+		const mcp = JSON.parse(files.find(f => f.path === '.vscode/mcp.json')!.content);
+		assert.ok(mcp.servers['Salesforce DX'].args.includes('DEFAULT_TARGET_ORG'));
+	});
+
+	test('preview flags existing files; create never overwrites and ignores unknown paths', () => {
+		const files = getProjectInitFiles({ isSfdxProject: false });
+		fs.writeFileSync(path.join(root, 'AGENTS.md'), 'mine');
+		const preview = previewProjectInit(root, files);
+		assert.strictEqual(preview.find(p => p.path === 'AGENTS.md')!.exists, true);
+		assert.strictEqual(preview.find(p => p.path === '.vscode/mcp.json')!.exists, false);
+
+		const res = createProjectInitFiles(root, files, ['AGENTS.md', '.vscode/mcp.json', '../outside.txt']);
+		assert.deepStrictEqual(res.created, ['.vscode/mcp.json']);
+		assert.deepStrictEqual(res.skipped, ['AGENTS.md']);
+		assert.deepStrictEqual(res.failed, []);
+		assert.strictEqual(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8'), 'mine');
+		assert.ok(!fs.existsSync(path.join(root, '..', 'outside.txt')));
+		assert.ok(!fs.existsSync(path.join(root, '.github')), 'unselected files are not created');
+	});
 });

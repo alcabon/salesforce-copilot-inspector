@@ -1,6 +1,6 @@
 # Test Suite — Salesforce Github Inspector
 
-78 tests across 12 suites (the Copilot / Claude Code usage parsers — `extractCopilotSkillReads`, `parseCopilotChatSession`, `parseClaudeTranscriptLine` — are covered in `src/test/extension.test.ts` and not detailed below). All tests run inside the VS Code extension host via `@vscode/test-cli` / `@vscode/test-electron` and target the compiled output at `out/test/**/*.test.js`.
+83 tests across 13 suites (the Copilot / Claude Code usage parsers — `extractCopilotSkillReads`, `parseCopilotChatSession`, `parseClaudeTranscriptLine` — are covered in `src/test/extension.test.ts` and not detailed below). All tests run inside the VS Code extension host via `@vscode/test-cli` / `@vscode/test-electron` and target the compiled output at `out/test/**/*.test.js`.
 
 ```
 npm run compile   # compile TypeScript first
@@ -161,6 +161,20 @@ Each test creates a real temporary directory with `fs.mkdtempSync`, writes a `SK
 |---|---|
 | covers every Checks-tab category | keys are exactly Instructions, Skills, Prompts, Agents, Copilot Hooks, Extensions, Settings |
 | `{category}`: has a summary and the required sections with content (×7) | non-empty summary; sections "When it is triggered", "Format", "Location", "Common use" and "What this tab checks" are present; no section is empty |
+
+---
+
+### Initialize Project Configuration — 5 tests
+
+Covers `readSfdxProjectInfo`, `getProjectInitFiles`, `previewProjectInit` and `createProjectInitFiles`, behind the Workspace tab's **Initialize Project Configuration** button. Uses a temp directory per test.
+
+| Test | What is verified |
+|---|---|
+| readSfdxProjectInfo reads the API version and the default package directory | `sourceApiVersion` and the `default: true` package directory (trailing `/` removed) |
+| readSfdxProjectInfo reports a non-SFDX folder | no `sfdx-project.json` → `{ isSfdxProject: false }` |
+| files have unique relative paths, no skills, and the project values | no duplicate, absolute, `..` or `\` paths; nothing under `/skills/`; API version and package directory written into `AGENTS.md` and the trigger prompt; `${input:…}` variables kept |
+| JSON files parse and the hook points to generated scripts | `guard.json`, `mcp.json`, `extensions.json` parse; both hook commands reference scripts that are generated; MCP uses `DEFAULT_TARGET_ORG` |
+| preview flags existing files; create never overwrites and ignores unknown paths | an existing `AGENTS.md` is reported and left untouched; only selected files are created; `../outside.txt` is ignored |
 
 ---
 

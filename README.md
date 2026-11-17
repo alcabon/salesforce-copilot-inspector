@@ -24,7 +24,7 @@ Under **Assets**, click `salesforce-copilot-inspector-<version>.vsix` to downloa
 code --install-extension salesforce-copilot-inspector-<version>.vsix
 
 # concrete example
-code --install-extension salesforce-copilot-inspector-0.3.0.vsix
+code --install-extension salesforce-copilot-inspector-0.4.0.vsix
 ```
 
 Or via the VS Code UI: open the Extensions side-bar (`Ctrl+Shift+P` → **Extensions: Install from VSIX…**) and browse to the downloaded file.
@@ -43,6 +43,11 @@ Or via the VS Code UI: open the Extensions side-bar (`Ctrl+Shift+P` → **Extens
 ## Overview
 
 **Salesforce Copilot Inspector** gives you a live dashboard for everything Copilot-related in your workspace. Four sidebar tabs let you inspect what is configured, create new files from templates, manage personal files stored in your user profile, and configure the Salesforce DX MCP server. Full editor panels handle the Salesforce Skills Library, skill spec validation, and skill usage monitoring.
+
+**Guides**
+
+- [Rules and Orders](RULES_AND_ORDERS.md) — when and in which order Copilot loads instructions, skills, prompts, agents, hooks, extensions and settings; agents vs skills; how to verify what was triggered.
+- [Best Practices](BEST_PRACTICES.md) — a complete, commented Copilot configuration for a Salesforce DX project: `AGENTS.md`, scoped instructions, prompts, custom agents, hooks, MCP, settings and the cloud coding agent.
 
 ---
 
@@ -97,6 +102,30 @@ Close the popup with **×**, **Esc** or a click outside it.
 ### Create (Workspace) tab
 
 Creates Copilot files committed to the open workspace — shared with the whole team.
+
+#### Initialize Project Configuration
+
+One button at the top of the tab creates the standard configuration from [Best Practices](BEST_PRACTICES.md) in one go. Skills are not included: install them from the [Salesforce Skills Library](#salesforce-skills-library).
+
+A popup first lists every file, grouped, and checks which ones already exist:
+
+| Group | Files |
+|---|---|
+| Agent guide | `AGENTS.md`, `CLAUDE.md` (optional) |
+| Instructions | `.github/copilot-instructions.md`, `.github/instructions/` `apex`, `apex-tests`, `lwc`, `metadata` `.instructions.md` |
+| Prompts | `.github/prompts/` `new-trigger`, `new-lwc`, `release-notes` `.prompt.md` |
+| Custom agents | `.github/agents/sf-planner.agent.md`, `.github/agents/apex-reviewer.agent.md` |
+| Hooks | `.github/hooks/guard.json` + `block-prod-deploy.sh` / `.ps1` (blocks deploys and deletes that name no target org or a protected org) |
+| MCP | `.vscode/mcp.json` (Salesforce DX server on `DEFAULT_TARGET_ORG`) |
+| Editor | `.vscode/settings.json`, `.vscode/extensions.json` |
+| Cloud coding agent | `.github/workflows/copilot-setup-steps.yml` (optional) |
+
+- **Existing files are never overwritten**: they are shown as *exists* and cannot be selected.
+- New files are ticked by default (optional ones are not); untick what you don't want, then click **Create**.
+- The API version and the package directory are read from `sfdx-project.json` and written into `AGENTS.md` and the prompts.
+- After creation: complete the TODO line in `AGENTS.md`, adjust `PROTECTED_ORGS` in the hook scripts, and commit.
+
+#### Individual files
 
 | File | Target path |
 |---|---|
@@ -261,6 +290,7 @@ Everything is read locally, nothing is sent anywhere:
 5. Click **check** on any skill to open the Skill Validation Report.
 6. Open the **Salesforce Skills Library** from the Create tabs to browse and install community skills.
 7. Switch to the **MCP** tab to verify and configure the Salesforce DX MCP server for VS Code or Claude Code.
+8. Read [Rules and Orders](RULES_AND_ORDERS.md) to understand what triggers each file, and [Best Practices](BEST_PRACTICES.md) for a recommended project layout.
 
 ---
 
@@ -281,7 +311,7 @@ npm install
 npm run package
 ```
 
-This produces `salesforce-copilot-inspector-<version>.vsix` in the project root (e.g. `salesforce-copilot-inspector-0.3.0.vsix`).
+This produces `salesforce-copilot-inspector-<version>.vsix` in the project root (e.g. `salesforce-copilot-inspector-0.4.0.vsix`).
 
 ---
 
@@ -308,7 +338,7 @@ Three equivalent methods — pick whichever fits your workflow.
 code --install-extension salesforce-copilot-inspector-<version>.vsix
 
 # concrete example
-code --install-extension salesforce-copilot-inspector-0.3.0.vsix
+code --install-extension salesforce-copilot-inspector-0.4.0.vsix
 ```
 
 The `code` CLI is bundled with VS Code. On Windows it may need to be added to `PATH` via **Command Palette → Shell Command: Install 'code' command in PATH**.

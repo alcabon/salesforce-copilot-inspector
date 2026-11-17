@@ -6,6 +6,16 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [0.4.0]
+
+### Added
+
+- Workspace tab: new **Initialize Project Configuration** button. A popup lists the 19 standard files from BEST_PRACTICES.md (AGENTS.md, instructions, prompts, custom agents, hooks, MCP, settings, coding-agent setup; no skills), marks the ones that already exist, and creates only the selected missing files. Existing files are never overwritten
+- Initialize Project Configuration: generated files use the API version and package directory from `sfdx-project.json`; the generated hook blocks Salesforce CLI deploys and deletes that name no target org or a protected one (bash and PowerShell versions); the MCP configuration uses `DEFAULT_TARGET_ORG` instead of a personal username
+- Docs: new [RULES_AND_ORDERS.md](RULES_AND_ORDERS.md) — when and in which order instructions, skills, prompts, agents, hooks, extensions and settings are triggered, agents vs skills, worked examples, and how to verify what was used
+- Docs: new [BEST_PRACTICES.md](BEST_PRACTICES.md) — recommended Copilot configuration for a Salesforce DX project, with ready-to-copy files, MCP and cloud coding agent setup, and anti-patterns
+- README: links to both guides and documentation of the new button
+
 ## [0.3.0]
 
 ### Added

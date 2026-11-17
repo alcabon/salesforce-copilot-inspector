@@ -1532,6 +1532,41 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
 				case 'createFile':
 					await this._handleCreate(webviewView.webview, data.fileType as string);
 					break;
+				case 'initProjectPreview': {
+					const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+					if (!root) {
+						webviewView.webview.postMessage({ type: 'initProjectPreview', error: 'No workspace folder open.' });
+						break;
+					}
+					const info = readSfdxProjectInfo(root);
+					webviewView.webview.postMessage({
+						type: 'initProjectPreview',
+						workspace: path.basename(root),
+						isSfdxProject: info.isSfdxProject,
+						apiVersion: info.apiVersion,
+						packageDir: info.packageDir,
+						files: previewProjectInit(root, getProjectInitFiles(info)),
+					});
+					break;
+				}
+				case 'initProjectCreate': {
+					const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+					if (!root) { break; }
+					const result = createProjectInitFiles(root, getProjectInitFiles(readSfdxProjectInfo(root)), (data.paths as string[]) ?? []);
+					webviewView.webview.postMessage({ type: 'initProjectResult', ...result });
+					if (result.failed.length > 0) {
+						vscode.window.showErrorMessage(`Project configuration: ${result.failed.length} file(s) could not be created — ${result.failed.map(f => f.path).join(', ')}`);
+					}
+					if (result.created.includes('AGENTS.md')) {
+						const open = await vscode.window.showInformationMessage(
+							`Project configuration: ${result.created.length} file(s) created. Complete the TODO line in AGENTS.md.`,
+							'Open AGENTS.md',
+						);
+						if (open) { await vscode.window.showTextDocument(vscode.Uri.file(path.join(root, 'AGENTS.md'))); }
+					}
+					await this._sendAll(webviewView.webview);
+					break;
+				}
 				case 'checkSkill': {
 					const idx = data.index as number;
 					const skillName = data.skillName as string;
@@ -2191,6 +2226,44 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
       border-radius: 4px;
     }
+    /* ── initialize project configuration ─────────────────── */
+    .init-card {
+      margin-top: 8px; padding: 8px 6px; border-radius: 4px;
+      border: 1px dashed var(--vscode-focusBorder, #007acc);
+    }
+    .init-btn { width: 100%; white-space: normal; padding: 5px 10px; }
+    .init-desc { margin-top: 6px; white-space: normal; }
+    .init-note { margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--vscode-descriptionForeground); }
+    .init-warn { color: #f0c040; }
+    .init-counts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; font-size: 13px; }
+    .init-counts .n-new { color: #4ec9b0; font-weight: 600; }
+    .init-counts .n-old { color: var(--vscode-descriptionForeground); }
+    .init-group {
+      margin: 10px 0 2px; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--vscode-textLink-foreground);
+    }
+    .init-row { display: flex; align-items: flex-start; gap: 6px; padding: 3px 2px; border-radius: 3px; }
+    .init-row:hover { background: var(--vscode-list-hoverBackground); }
+    .init-row input { margin: 2px 0 0; flex-shrink: 0; }
+    .init-row.exists { opacity: 0.6; }
+    .init-row-body { flex: 1; min-width: 0; }
+    .init-path {
+      font-family: var(--vscode-editor-font-family, monospace); font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .init-path, .init-row-desc { display: block; }
+    .init-row-desc { font-size: 12px; color: var(--vscode-descriptionForeground); line-height: 1.4; }
+    .init-tag { flex-shrink: 0; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.03em; margin-top: 1px; }
+    .init-tag.new  { color: #4ec9b0; border: 1px solid rgba(78,201,176,.5); }
+    .init-tag.kept { color: var(--vscode-descriptionForeground); border: 1px solid rgba(128,128,128,.4); }
+    .init-tag.fail { color: #f14c4c; border: 1px solid rgba(241,76,76,.5); }
+    .init-actions {
+      display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;
+      position: sticky; bottom: 0; padding: 8px 0 2px;
+      background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background, #252526));
+    }
+    .init-actions .btn-create:disabled { opacity: .5; cursor: not-allowed; }
     /* ── check rows ───────────────────────────────────────── */
     .check {
       display: flex; align-items: flex-start;
@@ -2511,6 +2584,10 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
   <!-- Tab 2: Create (Workspace) -->
   <div class="panel" id="panel-workspace">
     <p class="create-intro">Create Copilot files committed to the workspace — shared with the whole team.</p>
+    <div class="init-card">
+      <button class="btn-create new init-btn" id="btnInitProject">Initialize Project Configuration</button>
+      <div class="creator-desc init-desc">Standard Salesforce setup in one go: AGENTS.md, instructions, prompts, agents, hooks, MCP and settings (no skills). Existing files are kept.</div>
+    </div>
     <div id="creator-list">
       <div class="loading"><span class="spin">↻</span>&nbsp;Loading…</div>
     </div>
@@ -2539,6 +2616,18 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
         <button class="help-close" id="helpClose" title="Close (Esc)" aria-label="Close help">×</button>
       </div>
       <div id="helpBody"></div>
+    </div>
+  </div>
+
+  <!-- Initialize Project Configuration popup (Workspace tab) -->
+  <div class="help-overlay" id="initOverlay">
+    <div class="help-dialog" role="dialog" aria-modal="true" aria-labelledby="initTitle">
+      <div class="help-head">
+        <h2 class="help-title" id="initTitle">Initialize Project Configuration</h2>
+        <button class="help-close" id="initClose" title="Close (Esc)" aria-label="Close">×</button>
+      </div>
+      <div id="initBody"></div>
+      <div class="init-actions" id="initActions"></div>
     </div>
   </div>
 
@@ -2583,7 +2672,108 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
       if (e.target.id === 'helpOverlay') { closeHelp(); }
     });
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { closeHelp(); }
+      if (e.key === 'Escape') { closeHelp(); closeInit(); }
+    });
+
+    // ── initialize project configuration popup ────────────
+    let _initFiles = [];
+    let _initBusy = false;
+    function openInit() {
+      _initFiles = [];
+      document.getElementById('initBody').innerHTML =
+        '<div class="loading"><span class="spin">↻</span>&nbsp;Checking existing files…</div>';
+      document.getElementById('initActions').innerHTML = '';
+      const overlay = document.getElementById('initOverlay');
+      overlay.classList.add('open');
+      overlay.scrollTop = 0;
+      document.getElementById('initClose').focus();
+      vscode.postMessage({ type: 'initProjectPreview' });
+    }
+    function closeInit() {
+      const overlay = document.getElementById('initOverlay');
+      if (!overlay.classList.contains('open') || _initBusy) { return; }
+      overlay.classList.remove('open');
+      const btn = document.getElementById('btnInitProject');
+      if (btn) { btn.focus(); }
+    }
+    function initSelected() {
+      return [...document.querySelectorAll('#initBody .init-cb')].filter(cb => cb.checked && !cb.disabled).map(cb => cb.dataset.path);
+    }
+    function updateInitCreateBtn() {
+      const btn = document.getElementById('initCreate');
+      if (!btn) { return; }
+      const n = initSelected().length;
+      btn.disabled = n === 0;
+      btn.textContent = n === 0 ? 'Create' : 'Create (' + n + ')';
+    }
+    function renderInitPreview(d) {
+      const body = document.getElementById('initBody');
+      const actions = document.getElementById('initActions');
+      if (d.error) {
+        body.innerHTML = '<p class="init-note init-warn">⚠ ' + esc(d.error) + '</p>';
+        actions.innerHTML = '<button class="btn-create open" id="initCancel">Close</button>';
+        document.getElementById('initCancel').addEventListener('click', closeInit);
+        return;
+      }
+      _initFiles = d.files;
+      const nNew = d.files.filter(f => !f.exists).length;
+      const nOld = d.files.length - nNew;
+      let h = '<p class="help-summary">Creates the standard Copilot configuration for <strong>' + esc(d.workspace) +
+        '</strong> described in BEST_PRACTICES.md. Skills are not included: install them from the Salesforce Skills Library.</p>';
+      h += '<p class="init-note">' + (d.isSfdxProject
+        ? 'sfdx-project.json found: API version <strong>' + esc(d.apiVersion || '—') + '</strong>, package directory <strong>' + esc(d.packageDir || 'force-app') + '</strong> are written into the files.'
+        : '<span class="init-warn">⚠ No sfdx-project.json in this workspace: the files assume a Salesforce DX project with force-app/.</span>') + '</p>';
+      h += '<div class="init-counts"><span class="n-new">' + nNew + ' to create</span><span class="n-old">' + nOld + ' already exist — kept, never overwritten</span></div>';
+      let group = null;
+      for (const f of d.files) {
+        if (f.group !== group) { group = f.group; h += '<div class="init-group">' + esc(group) + '</div>'; }
+        const id = 'init-' + f.path.replace(/[^a-zA-Z0-9]/g, '-');
+        h += '<label class="init-row' + (f.exists ? ' exists' : '') + '" for="' + id + '">';
+        h += '<input type="checkbox" class="init-cb" id="' + id + '" data-path="' + esc(f.path) + '"' +
+          (f.exists ? ' disabled' : (f.optional ? '' : ' checked')) + '>';
+        h += '<span class="init-row-body"><span class="init-path">' + esc(f.path) + '</span>' +
+          '<span class="init-row-desc">' + esc(f.description) + (f.optional && !f.exists ? ' (optional)' : '') + '</span></span>';
+        h += '<span class="init-tag ' + (f.exists ? 'kept' : 'new') + '">' + (f.exists ? 'exists' : 'new') + '</span>';
+        h += '</label>';
+      }
+      body.innerHTML = h;
+      actions.innerHTML = '<button class="btn-create open" id="initCancel">Cancel</button>' +
+        '<button class="btn-create new" id="initCreate">Create</button>';
+      document.getElementById('initCancel').addEventListener('click', closeInit);
+      document.getElementById('initCreate').addEventListener('click', () => {
+        const paths = initSelected();
+        if (!paths.length) { return; }
+        _initBusy = true;
+        const btn = document.getElementById('initCreate');
+        btn.disabled = true;
+        btn.textContent = 'Creating…';
+        document.getElementById('initCancel').disabled = true;
+        vscode.postMessage({ type: 'initProjectCreate', paths });
+      });
+      body.querySelectorAll('.init-cb').forEach(cb => cb.addEventListener('change', updateInitCreateBtn));
+      updateInitCreateBtn();
+    }
+    function renderInitResult(d) {
+      _initBusy = false;
+      let h = '<div class="init-counts"><span class="n-new">' + d.created.length + ' created</span>' +
+        (d.skipped.length ? '<span class="n-old">' + d.skipped.length + ' skipped (already existed)</span>' : '') +
+        (d.failed.length ? '<span class="init-warn">' + d.failed.length + ' failed</span>' : '') + '</div>';
+      const row = (p, cls, tag, note) => '<div class="init-row"><span class="init-row-body"><span class="init-path">' + esc(p) + '</span>' +
+        (note ? '<span class="init-row-desc">' + esc(note) + '</span>' : '') + '</span><span class="init-tag ' + cls + '">' + tag + '</span></div>';
+      for (const p of d.created) { h += row(p, 'new', 'created'); }
+      for (const p of d.skipped) { h += row(p, 'kept', 'kept'); }
+      for (const f of d.failed)  { h += row(f.path, 'fail', 'failed', f.error); }
+      h += '<p class="init-note">Next: complete the TODO line in AGENTS.md, set PROTECTED_ORGS in the hook scripts, ' +
+        'install skills from the Salesforce Skills Library, and commit the files.</p>';
+      document.getElementById('initBody').innerHTML = h;
+      document.getElementById('initActions').innerHTML = '<button class="btn-create new" id="initDone">Close</button>';
+      document.getElementById('initDone').addEventListener('click', closeInit);
+      document.getElementById('initDone').focus();
+    }
+    document.getElementById('btnInitProject').addEventListener('click', openInit);
+    document.getElementById('initClose').addEventListener('click', closeInit);
+    document.getElementById('initOverlay').addEventListener('click', e => {
+      if (e.target.id === 'initOverlay') { closeInit(); }
     });
 
     // ── summary button ────────────────────────────────────
@@ -2608,6 +2798,14 @@ class CopilotChecksViewProvider implements vscode.WebviewViewProvider {
     let _checks = [];
 
     window.addEventListener('message', ({ data }) => {
+      if (data.type === 'initProjectPreview') {
+        renderInitPreview(data);
+        return;
+      }
+      if (data.type === 'initProjectResult') {
+        renderInitResult(data);
+        return;
+      }
       if (data.type === 'loading') {
         document.getElementById('checks-root').innerHTML =
           '<div class="loading"><span class="spin">↻</span>&nbsp;Running checks\u2026</div>';
@@ -4838,6 +5036,442 @@ export const CATEGORY_HELP: Record<string, CategoryHelp> = {
 		],
 	},
 };
+
+// ---------------------------------------------------------------------------
+// Project initialisation — the standard Copilot configuration of BEST_PRACTICES.md
+// ---------------------------------------------------------------------------
+
+/** A file created by "Initialize Project Configuration". `path` is relative to the workspace root, with '/'. */
+export interface ProjectInitFile {
+	path: string;
+	group: string;
+	description: string;
+	/** Optional files are listed but unticked by default. */
+	optional?: boolean;
+	content: string;
+}
+
+export interface SfdxProjectInfo {
+	isSfdxProject: boolean;
+	apiVersion?: string;
+	packageDir?: string;
+}
+
+/** Reads sourceApiVersion and the default package directory from sfdx-project.json. */
+export function readSfdxProjectInfo(root: string): SfdxProjectInfo {
+	try {
+		const raw = fs.readFileSync(path.join(root, 'sfdx-project.json'), 'utf8');
+		const json = JSON.parse(stripJsonComments(raw)) as {
+			sourceApiVersion?: string;
+			packageDirectories?: { path?: string; default?: boolean }[];
+		};
+		const dirs = json.packageDirectories ?? [];
+		const dir = (dirs.find(d => d.default) ?? dirs[0])?.path;
+		return {
+			isSfdxProject: true,
+			apiVersion: typeof json.sourceApiVersion === 'string' ? json.sourceApiVersion : undefined,
+			packageDir: typeof dir === 'string' ? dir.replace(/\\/g, '/').replace(/\/+$/, '') : undefined,
+		};
+	} catch {
+		return { isSfdxProject: false };
+	}
+}
+
+const mdLines = (...l: string[]): string => l.join('\n') + '\n';
+
+/** The standard project configuration (skills excluded: they come from the Salesforce Skills Library). */
+export function getProjectInitFiles(info: SfdxProjectInfo): ProjectInitFile[] {
+	const pkg = info.packageDir ?? 'force-app';
+	const api = info.apiVersion ?? 'see `sourceApiVersion` in sfdx-project.json';
+	return [
+		// ── Agent guide ─────────────────────────────────────────────────────
+		{
+			path: 'AGENTS.md', group: 'Agent guide',
+			description: 'Project facts and commands, read by Copilot and other coding agents',
+			content: mdLines(
+				'# AGENTS.md',
+				'',
+				'## Project',
+				'- TODO: one line on the business scope of this Salesforce project.',
+				`- API version ${api}. Source format, package directory: \`${pkg}/\`.`,
+				'- Orgs: scratch orgs for development, a sandbox for UAT. Production is deployed by CI only.',
+				'',
+				'## Structure',
+				`- \`${pkg}/main/default/classes/\` — Apex. Layers: \`*Selector\` (SOQL), \`*Service\` (logic), \`*Domain\` (sObject rules), \`*Controller\` (LWC/Aura entry points).`,
+				`- \`${pkg}/main/default/triggers/\` — one trigger per object, logic in \`*TriggerHandler\`.`,
+				`- \`${pkg}/main/default/lwc/\` — Lightning Web Components, Jest tests in \`__tests__/\`.`,
+				'- `scripts/apex/` — anonymous Apex for data setup. `config/` — scratch org definitions.',
+				'',
+				'## Commands',
+				'- Install: `npm ci`',
+				'- Create a scratch org: `sf org create scratch -f config/project-scratch-def.json -a dev -d`',
+				`- Deploy to the default org: \`sf project deploy start -d ${pkg}\``,
+				'- Apex tests: `sf apex run test -l RunLocalTests -w 20 -r human`',
+				'- LWC tests: `npm run test:unit`',
+				'- Lint: `npm run lint` · Format: `npm run prettier`',
+				`- Static analysis: \`sf code-analyzer run --workspace ${pkg}\``,
+				'',
+				'## Rules for any change',
+				'- Run the Apex tests of the classes you changed and `npm run test:unit` for LWC before saying a task is done.',
+				'- Never deploy to production or run destructive changes; CI does it.',
+				'- Never commit credentials, auth URLs or org usernames.',
+				'- Keep each change small: one feature or fix per pull request.',
+			),
+		},
+		{
+			path: 'CLAUDE.md', group: 'Agent guide', optional: true,
+			description: 'Makes Claude Code read AGENTS.md (only if the team uses Claude Code)',
+			content: mdLines('@AGENTS.md'),
+		},
+		// ── Instructions ────────────────────────────────────────────────────
+		{
+			path: '.github/copilot-instructions.md', group: 'Instructions',
+			description: 'Copilot-only behaviour, also used by Copilot code review',
+			content: mdLines(
+				'# Copilot instructions',
+				'',
+				'- Project facts and commands are in AGENTS.md; follow them.',
+				'- Be concise. Show code first, explanation after.',
+				'- Before writing Apex, check whether a Selector or Service already exists for the object and reuse it.',
+				'- When a request is ambiguous about the target org, ask; never assume production.',
+				'- In code reviews, focus on: governor limits (SOQL/DML in loops, unbounded queries), sharing and CRUD/FLS,',
+				'  test quality (assertions, bulk tests with 200 records), and hard-coded IDs or URLs.',
+				'  Do not comment on formatting: Prettier handles it.',
+			),
+		},
+		{
+			path: '.github/instructions/apex.instructions.md', group: 'Instructions',
+			description: 'Apex standards — applyTo **/*.cls, **/*.trigger',
+			content: mdLines(
+				'---',
+				'applyTo: "**/*.cls,**/*.trigger"',
+				'description: Apex coding standards',
+				'---',
+				'- Classes are `with sharing` unless a comment explains why `without sharing` or `inherited sharing` is needed.',
+				'- Bulkify everything: no SOQL or DML inside loops; collect IDs, query once, update once.',
+				'- SOQL lives in `*Selector` classes, uses bind variables and `WITH USER_MODE` (or `Security.stripInaccessible`).',
+				'- DML uses `Database.*` with `AccessLevel.USER_MODE` when called from user context.',
+				'- One trigger per object; the trigger only calls `<Object>TriggerHandler`.',
+				'- No hard-coded record IDs, profile names or URLs: use Custom Metadata or Custom Labels.',
+				'- Throw custom exceptions (`<Feature>Exception`) instead of returning null for errors.',
+				'- Methods called from LWC are `@AuraEnabled(cacheable=true)` only when they do not modify data.',
+			),
+		},
+		{
+			path: '.github/instructions/apex-tests.instructions.md', group: 'Instructions',
+			description: 'Apex test standards — applyTo **/*Test.cls',
+			content: mdLines(
+				'---',
+				'applyTo: "**/*Test.cls,**/*_Test.cls"',
+				'description: Apex test standards',
+				'---',
+				'- Use a `TestDataFactory` for records; never `SeeAllData=true`.',
+				'- Each test method follows Arrange / Act / Assert, with `Test.startTest()` / `Test.stopTest()` around Act.',
+				'- Every test asserts with `Assert.areEqual` / `Assert.isTrue` and a message. A test without assertions is a bug.',
+				'- Include a bulk test (200 records) for every trigger handler and batch.',
+				'- Test negative paths and a user without permissions (`System.runAs`).',
+			),
+		},
+		{
+			path: '.github/instructions/lwc.instructions.md', group: 'Instructions',
+			description: 'Lightning Web Components standards — applyTo **/lwc/**',
+			content: mdLines(
+				'---',
+				'applyTo: "**/lwc/**"',
+				'description: Lightning Web Components standards',
+				'---',
+				'- Use SLDS classes and design tokens; no hard-coded colours or pixel sizes.',
+				'- Read data with `@wire` and Lightning Data Service (`lightning/uiRecordApi`) before writing Apex.',
+				'- Call imperative Apex only for writes or for queries that cannot be wired; handle errors with a toast.',
+				'- Every component has Jest tests in `__tests__/`, mocking wire adapters and Apex.',
+				'- Text visible to users comes from Custom Labels (`@salesforce/label/...`).',
+				'- Components are accessible: labels on inputs, keyboard navigation, `alternative-text` on icons.',
+			),
+		},
+		{
+			path: '.github/instructions/metadata.instructions.md', group: 'Instructions',
+			description: 'Metadata XML rules — applyTo **/*-meta.xml',
+			content: mdLines(
+				'---',
+				'applyTo: "**/*-meta.xml"',
+				'description: Metadata XML rules',
+				'---',
+				'- Keep the API version of new metadata equal to `sourceApiVersion` in sfdx-project.json.',
+				'- Never grant "Modify All Data" or "View All Data" in permission sets; one permission set per feature.',
+				'- Record-triggered Flows: before-save for field updates on the same record, after-save for related records;',
+				'  every Flow has a fault path.',
+				'- Do not edit `*.profile-meta.xml`; use permission sets.',
+			),
+		},
+		// ── Prompts ─────────────────────────────────────────────────────────
+		{
+			path: '.github/prompts/new-trigger.prompt.md', group: 'Prompts',
+			description: '/new-trigger — trigger, handler and tests for an sObject',
+			content: mdLines(
+				'---',
+				'description: Create a trigger, its handler and tests for an sObject',
+				'agent: agent',
+				'argument-hint: sObject API name, e.g. Opportunity',
+				'---',
+				'Create the trigger framework for ${input:sobject:sObject API name}:',
+				'',
+				`1. \`${pkg}/main/default/triggers/\${input:sobject}Trigger.trigger\` — calls the handler only.`,
+				'2. `${input:sobject}TriggerHandler.cls` following the Apex instructions.',
+				'3. A test class with a bulk test of 200 records.',
+				'',
+				'Then run the new tests with the command from AGENTS.md and report the result.',
+			),
+		},
+		{
+			path: '.github/prompts/new-lwc.prompt.md', group: 'Prompts',
+			description: '/new-lwc — Lightning Web Component with Jest tests',
+			content: mdLines(
+				'---',
+				'description: Scaffold a Lightning Web Component with Jest tests',
+				'agent: agent',
+				'argument-hint: component name in camelCase',
+				'---',
+				`Create the LWC \`\${input:name:component name in camelCase}\` in \`${pkg}/main/default/lwc/\` with HTML, JS, meta XML`,
+				'(target lightning__RecordPage) and a Jest test in `__tests__/`.',
+				'Follow the LWC instructions. Run `npm run test:unit -- ${input:name}` and fix failures.',
+			),
+		},
+		{
+			path: '.github/prompts/release-notes.prompt.md', group: 'Prompts',
+			description: '/release-notes — business-facing notes for this branch',
+			content: mdLines(
+				'---',
+				'description: Draft release notes from the changes on this branch',
+				'agent: ask',
+				'---',
+				'Summarise the changes on this branch compared with `main` for business users:',
+				'new features, fixes, and manual post-deployment steps (permission sets to assign, data to load).',
+				'Group by feature, one line each, no code.',
+			),
+		},
+		// ── Custom agents ───────────────────────────────────────────────────
+		{
+			path: '.github/agents/sf-planner.agent.md', group: 'Custom agents',
+			description: 'Read-only planner that hands off to implementation',
+			content: mdLines(
+				'---',
+				'description: Plans a Salesforce change (objects, Apex, LWC, permissions) without editing files',
+				'# Tool names as shown in "Configure Tools"; they can change between VS Code versions.',
+				'tools: [\'search\', \'usages\', \'problems\', \'fetch\', \'Salesforce DX/*\']',
+				'handoffs:',
+				'  - label: Implement the plan',
+				'    agent: agent',
+				'    prompt: Implement the plan above, step by step, running tests after each step.',
+				'    send: false',
+				'---',
+				'You are a Salesforce technical architect. Do not edit files.',
+				'',
+				'For each request, produce a plan with:',
+				'1. Metadata to create or change (objects, fields, permission sets, Flows).',
+				'2. Apex and LWC changes, reusing existing Selectors and Services.',
+				'3. Tests to add and how to run them (commands from AGENTS.md).',
+				'4. Risks: governor limits, sharing, data migration, deployment order.',
+				'',
+				'Use the Salesforce DX tools only to read org metadata; never deploy or change data.',
+			),
+		},
+		{
+			path: '.github/agents/apex-reviewer.agent.md', group: 'Custom agents',
+			description: 'Read-only reviewer for Apex and LWC',
+			content: mdLines(
+				'---',
+				'description: Reviews Apex and LWC for limits, security and test quality; never edits',
+				'tools: [\'search\', \'usages\', \'problems\', \'changes\']',
+				'---',
+				'You review code; you never change it.',
+				'',
+				'Report findings as a table: file:line, severity (blocker / major / minor), issue, suggested fix.',
+				'Check in this order: SOQL/DML in loops, missing sharing or CRUD/FLS, hard-coded IDs, missing or weak',
+				'test assertions, error handling, naming. Say "No issues found" when that is the case.',
+			),
+		},
+		// ── Hooks ───────────────────────────────────────────────────────────
+		{
+			path: '.github/hooks/guard.json', group: 'Hooks',
+			description: 'Pre-tool hook that blocks deploys/deletes to protected orgs',
+			content: JSON.stringify({
+				version: 1,
+				hooks: {
+					preToolUse: [{
+						type: 'command',
+						bash: 'bash .github/hooks/scripts/block-prod-deploy.sh',
+						powershell: 'powershell -NoProfile -ExecutionPolicy Bypass -File .github/hooks/scripts/block-prod-deploy.ps1',
+						timeoutSec: 10,
+					}],
+				},
+			}, null, 2) + '\n',
+		},
+		{
+			path: '.github/hooks/scripts/block-prod-deploy.sh', group: 'Hooks',
+			description: 'Hook script (bash): edit PROTECTED_ORGS for your project',
+			content: mdLines(
+				'#!/usr/bin/env bash',
+				'# Copilot pre-tool hook. Blocks Salesforce CLI deploy/delete commands that do not name',
+				'# their target org, or that target a protected org. Edit PROTECTED_ORGS for your project.',
+				'PROTECTED_ORGS=\'prod|production\'',
+				'',
+				'input=$(cat)',
+				'',
+				'# Only deploy and delete commands are checked; everything else is allowed.',
+				'if ! printf \'%s\' "$input" | grep -Eq \'sf (project deploy (start|quick|resume)|data delete|org delete)|destructiveChanges\'; then',
+				'  exit 0',
+				'fi',
+				'',
+				'target=$(printf \'%s\' "$input" | grep -Eo -- \'(-o|--target-org)[ =]+[^ "\\\\]+\' | head -n 1 | sed -E \'s/^(-o|--target-org)[ =]+//\')',
+				'',
+				'if [ -z "$target" ]; then',
+				'  reason=\'Deploy and delete commands must name their target org (--target-org).\'',
+				'elif printf \'%s\' "$target" | grep -Eiq "^($PROTECTED_ORGS)$"; then',
+				'  reason="Org $target is protected: production changes go through CI."',
+				'else',
+				'  exit 0',
+				'fi',
+				'',
+				'printf \'{"permissionDecision":"deny","permissionDecisionReason":"%s"}\\n\' "$reason"',
+			),
+		},
+		{
+			path: '.github/hooks/scripts/block-prod-deploy.ps1', group: 'Hooks',
+			description: 'Hook script (PowerShell): same rules as the bash script',
+			content: mdLines(
+				'# Copilot pre-tool hook. Blocks Salesforce CLI deploy/delete commands that do not name',
+				'# their target org, or that target a protected org. Edit $ProtectedOrgs for your project.',
+				'$ProtectedOrgs = \'prod|production\'',
+				'',
+				'$inputText = [Console]::In.ReadToEnd()',
+				'',
+				'# Only deploy and delete commands are checked; everything else is allowed.',
+				'if ($inputText -notmatch \'sf (project deploy (start|quick|resume)|data delete|org delete)|destructiveChanges\') { exit 0 }',
+				'',
+				'$m = [regex]::Match($inputText, \'(-o|--target-org)[ =]+([^ "\\\\]+)\')',
+				'if (-not $m.Success) {',
+				'  $reason = \'Deploy and delete commands must name their target org (--target-org).\'',
+				'} elseif ($m.Groups[2].Value -match "^($ProtectedOrgs)$") {',
+				'  $reason = "Org $($m.Groups[2].Value) is protected: production changes go through CI."',
+				'} else {',
+				'  exit 0',
+				'}',
+				'',
+				'@{ permissionDecision = \'deny\'; permissionDecisionReason = $reason } | ConvertTo-Json -Compress',
+			),
+		},
+		// ── MCP ─────────────────────────────────────────────────────────────
+		{
+			path: '.vscode/mcp.json', group: 'MCP',
+			description: 'Salesforce DX MCP server on each developer\'s default org',
+			content: JSON.stringify({
+				servers: {
+					'Salesforce DX': {
+						type: 'stdio',
+						command: 'npx',
+						args: ['-y', '@salesforce/mcp', '--orgs', 'DEFAULT_TARGET_ORG', '--toolsets', 'sobjects,data,testing,code-analysis,lwc-experts'],
+					},
+				},
+			}, null, 2) + '\n',
+		},
+		// ── Editor ──────────────────────────────────────────────────────────
+		{
+			path: '.vscode/settings.json', group: 'Editor',
+			description: 'Copilot customisation switches and formatting',
+			content: mdLines(
+				'{',
+				'  // Copilot customisation files',
+				'  "github.copilot.chat.codeGeneration.useInstructionFiles": true,',
+				'  "chat.useAgentsMdFile": true,',
+				'  "chat.instructionsFilesLocations": { ".github/instructions": true },',
+				'  "chat.promptFilesLocations": { ".github/prompts": true },',
+				'',
+				'  // Inline suggestions: on for code, off where they only add noise',
+				'  "github.copilot.enable": { "*": true, "plaintext": false, "markdown": false },',
+				'',
+				'  // Formatting (Apex needs prettier-plugin-apex in devDependencies)',
+				'  "editor.formatOnSave": true',
+				'}',
+			),
+		},
+		{
+			path: '.vscode/extensions.json', group: 'Editor',
+			description: 'Recommended extensions for the team',
+			content: JSON.stringify({
+				recommendations: ['salesforce.salesforcedx-vscode', 'github.copilot-chat', 'esbenp.prettier-vscode', 'dbaeumer.vscode-eslint'],
+			}, null, 2) + '\n',
+		},
+		// ── Cloud coding agent ──────────────────────────────────────────────
+		{
+			path: '.github/workflows/copilot-setup-steps.yml', group: 'Cloud coding agent', optional: true,
+			description: 'Tools for the Copilot coding agent on GitHub (Node + Salesforce CLI)',
+			content: mdLines(
+				'name: Copilot setup steps',
+				'on: workflow_dispatch',
+				'jobs:',
+				'  copilot-setup-steps:        # this job name is required',
+				'    runs-on: ubuntu-latest',
+				'    permissions:',
+				'      contents: read',
+				'    steps:',
+				'      - uses: actions/checkout@v4',
+				'      - uses: actions/setup-node@v4',
+				'        with:',
+				'          node-version: 22',
+				'          cache: npm',
+				'      - run: npm ci',
+				'      - run: npm install --global @salesforce/cli',
+				'      # Optional: a Dev Hub to create scratch orgs. Store the auth URL in the "copilot" environment secrets.',
+				'      # - run: echo "${{ secrets.DEVHUB_SFDX_AUTH_URL }}" | sf org login sfdx-url --sfdx-url-stdin --set-default-dev-hub',
+			),
+		},
+	];
+}
+
+/** Preview row sent to the webview: the file list without contents, plus whether each file exists. */
+export interface ProjectInitPreviewRow {
+	path: string;
+	group: string;
+	description: string;
+	optional: boolean;
+	exists: boolean;
+}
+
+export function previewProjectInit(root: string, files: ProjectInitFile[]): ProjectInitPreviewRow[] {
+	return files.map(f => ({
+		path: f.path, group: f.group, description: f.description,
+		optional: !!f.optional,
+		exists: fileExists(path.join(root, f.path)),
+	}));
+}
+
+/**
+ * Creates the selected files that do not exist yet. Existing files are never touched:
+ * the 'wx' flag makes the write fail if a file appeared since the preview.
+ * Paths not in `files` are ignored, so the webview cannot write elsewhere.
+ */
+export function createProjectInitFiles(root: string, files: ProjectInitFile[], selected: string[]): { created: string[]; skipped: string[]; failed: { path: string; error: string }[] } {
+	const wanted = new Set(selected);
+	const created: string[] = [], skipped: string[] = [], failed: { path: string; error: string }[] = [];
+	for (const f of files) {
+		if (!wanted.has(f.path)) { continue; }
+		const full = path.join(root, f.path);
+		if (fileExists(full)) { skipped.push(f.path); continue; }
+		try {
+			fs.mkdirSync(path.dirname(full), { recursive: true });
+			fs.writeFileSync(full, f.content, { encoding: 'utf8', flag: 'wx' });
+			if (f.path.endsWith('.sh')) {
+				try { fs.chmodSync(full, 0o755); } catch { /* not supported on this filesystem */ }
+			}
+			created.push(f.path);
+		} catch (e) {
+			const code = (e as NodeJS.ErrnoException).code;
+			if (code === 'EEXIST') { skipped.push(f.path); }
+			else { failed.push({ path: f.path, error: (e as Error).message }); }
+		}
+	}
+	return { created, skipped, failed };
+}
 
 // ---------------------------------------------------------------------------
 // SummaryPanel — editor-area panel summarising all installed Copilot files
